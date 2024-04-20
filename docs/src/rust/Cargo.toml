@@ -123,6 +123,11 @@ path = "user-guide/io/parquet.rs"
 required-features = ["polars/parquet"]
 
 [[bin]]
+name = "user-guide-io-hdf5"
+path = "user-guide/io/hdf5.rs"
+required-features = ["polars/hdf5"]
+
+[[bin]]
 name = "user-guide-transformations-concatenation"
 path = "user-guide/transformations/concatenation.rs"
 required-features = ["polars/lazy"]

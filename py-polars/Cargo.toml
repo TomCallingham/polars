@@ -13,6 +13,7 @@ polars-error = { workspace = true }
 polars-lazy = { workspace = true, features = ["python"] }
 polars-ops = { workspace = true }
 polars-parquet = { workspace = true, optional = true }
+polars-hdf5 = { workspace = true, optional = true }
 polars-plan = { workspace = true }
 polars-utils = { workspace = true }
 
@@ -26,7 +27,11 @@ ndarray = { workspace = true }
 num-traits = { workspace = true }
 numpy = { version = "0.20", default-features = false }
 once_cell = { workspace = true }
-pyo3 = { workspace = true, features = ["abi3-py38", "extension-module", "multiple-pymethods"] }
+pyo3 = { workspace = true, features = [
+  "abi3-py38",
+  "extension-module",
+  "multiple-pymethods",
+] }
 pyo3-built = { version = "0.4", optional = true }
 serde_json = { workspace = true, optional = true }
 smartstring = { workspace = true }
@@ -93,7 +98,11 @@ features = [
 ]
 
 [build-dependencies]
-built = { version = "0.7", features = ["chrono", "git2", "cargo-lock"], optional = true }
+built = { version = "0.7", features = [
+  "chrono",
+  "git2",
+  "cargo-lock",
+], optional = true }
 
 [target.'cfg(any(not(target_family = "unix"), use_mimalloc))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
@@ -110,6 +119,7 @@ dtype-u8 = []
 dtype-u16 = []
 avro = ["polars/avro"]
 parquet = ["polars/parquet", "polars-parquet"]
+hdf5 = ["polars/hdf5", "polars-hdf5"]
 ipc = ["polars/ipc"]
 ipc_streaming = ["polars/ipc_streaming"]
 is_in = ["polars/is_in"]
@@ -153,18 +163,18 @@ cutqcut = ["polars/cutqcut"]
 rle = ["polars/rle"]
 extract_groups = ["polars/extract_groups"]
 ffi_plugin = ["polars-plan/ffi_plugin"]
-cloud = ["polars/cloud", "polars/aws", "polars/gcp", "polars/azure", "polars/http"]
+cloud = [
+  "polars/cloud",
+  "polars/aws",
+  "polars/gcp",
+  "polars/azure",
+  "polars/http",
+]
 peaks = ["polars/peaks"]
 hist = ["polars/hist"]
 find_many = ["polars/find_many"]
 
-dtypes = [
-  "dtype-i8",
-  "dtype-i16",
-  "dtype-u8",
-  "dtype-u16",
-  "object",
-]
+dtypes = ["dtype-i8", "dtype-i16", "dtype-u8", "dtype-u16", "object"]
 
 operations = [
   "array_any_all",
@@ -201,6 +211,7 @@ operations = [
 io = [
   "json",
   "parquet",
+  "hdf5",
   "ipc",
   "ipc_streaming",
   "avro",
@@ -209,11 +220,7 @@ io = [
   "clipboard",
 ]
 
-optimizations = [
-  "cse",
-  "polars/fused",
-  "streaming",
-]
+optimizations = ["cse", "polars/fused", "streaming"]
 
 all = [
   "optimizations",
@@ -233,7 +240,4 @@ all = [
 # https://github.com/rust-lang/cargo/issues/1197
 # so we have an indirection and compile
 # with --no-default-features --features=all for targets without simd
-default = [
-  "all",
-  "nightly",
-]
+default = ["all", "nightly"]

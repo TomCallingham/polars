@@ -18,6 +18,9 @@ pub mod ndjson;
 #[cfg(feature = "cloud")]
 pub use cloud::glob as async_glob;
 
+#[cfg(feature = "hdf5")]
+pub mod hdf5;
+
 pub mod mmap;
 mod options;
 #[cfg(feature = "parquet")]

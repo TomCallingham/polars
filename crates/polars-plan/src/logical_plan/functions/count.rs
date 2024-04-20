@@ -6,6 +6,8 @@ use polars_core::error::to_compute_err;
 use polars_io::cloud::CloudOptions;
 #[cfg(feature = "csv")]
 use polars_io::csv::count_rows as count_rows_csv;
+#[cfg(feature = "hdf5")]
+use polars_io::hdf5::count_rows as count_rows_hdf5;
 #[cfg(all(feature = "parquet", feature = "cloud"))]
 use polars_io::parquet::ParquetAsyncReader;
 #[cfg(feature = "parquet")]
@@ -44,6 +46,15 @@ pub fn count_rows(paths: &Arc<[PathBuf]>, scan_type: &FileScan) -> PolarsResult<
         #[cfg(feature = "parquet")]
         FileScan::Parquet { cloud_options, .. } => {
             let n_rows = count_rows_parquet(paths, cloud_options.as_ref())?;
+            Ok(DataFrame::new(vec![Series::new(
+                crate::constants::LEN,
+                [n_rows as IdxSize],
+            )])
+            .unwrap())
+        },
+        #[cfg(feature = "hdf5")]
+        FileScan::Hdf5 { options } => {
+            let n_rows = count_rows_hdf5(paths, options.subgroup, options.format)?;
             Ok(DataFrame::new(vec![Series::new(
                 crate::constants::LEN,
                 [n_rows as IdxSize],

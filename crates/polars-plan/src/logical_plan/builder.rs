@@ -4,6 +4,8 @@ use std::io::{Read, Seek};
 use polars_core::prelude::*;
 #[cfg(feature = "parquet")]
 use polars_io::cloud::CloudOptions;
+#[cfg(feature = "hdf5")]
+use polars_io::hdf5::Hdf5Reader;
 #[cfg(all(feature = "parquet", feature = "async"))]
 use polars_io::parquet::ParquetAsyncReader;
 #[cfg(feature = "parquet")]
@@ -15,7 +17,8 @@ use polars_io::HiveOptions;
     feature = "parquet",
     feature = "parquet_async",
     feature = "csv",
-    feature = "ipc"
+    feature = "ipc",
+    feature = "hdf5"
 ))]
 use polars_io::RowIndex;
 #[cfg(feature = "csv")]
@@ -228,6 +231,74 @@ impl LogicalPlanBuilder {
                 },
                 cloud_options,
                 metadata,
+            },
+        }
+        .into())
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_hdf5<P: Into<Arc<[std::path::PathBuf]>>>(
+        paths: P,
+        // subgroup: Option<&str>,
+        // format: Option<&str>,
+        // n_rows: Option<usize>,
+        // cache: bool,
+        // parallel: polars_io::hdf5::ParallelStrategy,
+        // row_index: Option<RowIndex>,
+        // rechunk: bool,
+        // low_memory: bool,
+        // cloud_options: Option<CloudOptions>,
+    ) -> PolarsResult<Self> {
+        // use polars_io::{is_cloud_url, SerReader as _};
+
+        let paths = paths.into();
+        polars_ensure!(paths.len() >= 1, ComputeError: "expected at least 1 path");
+
+        // Use first path to get schema.
+        let path = &paths[0];
+
+        let file = polars_utils::open_file(path)?;
+        let mut reader = Hdf5Reader::new(file);
+        let reader_schema = reader.schema()?;
+        /* let schema = prepare_schema((&reader_schema).into(), row_index.as_ref());
+        (
+            schema,
+            reader_schema,
+            Some(reader.num_rows()?),
+            Some(reader.get_metadata()?.clone()),
+        ) */
+
+        //TODO: Below
+
+        let mut file_info = FileInfo::new(
+            schema,
+            Some(reader_schema),
+            (num_rows, num_rows.unwrap_or(0)),
+        );
+
+        let options = FileScanOptions {
+            with_columns: None,
+            cache,
+            n_rows,
+            rechunk,
+            row_index,
+            file_counter: Default::default(),
+            hive_options,
+        };
+        Ok(LogicalPlan::Scan {
+            paths,
+            file_info,
+            file_options: options,
+            predicate: None,
+            scan_type: FileScan::Hdf5 {
+                options: hdf5Options {
+                    parallel,
+                    low_memory,
+                    use_statistics,
+                },
+                /* cloud_options,
+                metadata, */
             },
         }
         .into())

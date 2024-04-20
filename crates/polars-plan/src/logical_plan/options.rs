@@ -67,6 +67,25 @@ pub struct ParquetWriteOptions {
     pub maintain_order: bool,
 }
 
+#[cfg(feature = "hdf5")]
+#[derive(Clone, Debug, PartialEq, Eq, Copy, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Hdf5Options {
+    pub subgroup: Option<&str>,
+    pub format: Option<&str>,
+    // pub parallel: polars_io::hdf5::ParallelStrategy,
+    // pub low_memory: bool,
+    // pub use_statistics: bool,
+}
+
+#[cfg(feature = "hdf5")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Hdf5WriteOptions {
+    /// maintain the order the data was processed
+    pub maintain_order: bool,
+}
+
 #[cfg(feature = "ipc")]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -355,6 +374,8 @@ pub struct FileSinkOptions {
 pub enum FileType {
     #[cfg(feature = "parquet")]
     Parquet(ParquetWriteOptions),
+    #[cfg(feature = "hdf5")]
+    Harquet(Hdf5WriteOptions),
     #[cfg(feature = "ipc")]
     Ipc(IpcWriterOptions),
     #[cfg(feature = "csv")]

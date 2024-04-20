@@ -5,6 +5,7 @@ from polars.io.clipboard import read_clipboard
 from polars.io.csv import read_csv, read_csv_batched, scan_csv
 from polars.io.database import read_database, read_database_uri
 from polars.io.delta import read_delta, scan_delta
+from polars.io.hdf5 import read_hdf5  #, read_hdf5_schema#, scan_hdf5
 from polars.io.iceberg import scan_iceberg
 from polars.io.ipc import read_ipc, read_ipc_schema, read_ipc_stream, scan_ipc
 from polars.io.json import read_json
@@ -29,6 +30,8 @@ __all__ = [
     "read_ods",
     "read_parquet",
     "read_parquet_schema",
+    "read_hdf5",
+    # "read_hdf5_schema",
     "scan_csv",
     "scan_delta",
     "scan_iceberg",

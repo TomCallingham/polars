@@ -17,6 +17,14 @@ pub enum FileScan {
         #[cfg_attr(feature = "serde", serde(skip))]
         metadata: Option<Arc<FileMetaData>>,
     },
+    #[cfg(feature = "hdf5")]
+    Hdf5 {
+        options: Hdf5Options,
+        // TODO: Add options?
+        /* cloud_options: Option<polars_io::cloud::CloudOptions>,
+        #[cfg_attr(feature = "serde", serde(skip))]
+        metadata: Option<Arc<FileMetaData>>, */
+    },
     #[cfg(feature = "ipc")]
     Ipc {
         options: IpcScanOptions,
@@ -36,6 +44,8 @@ impl PartialEq for FileScan {
         match (self, other) {
             #[cfg(feature = "csv")]
             (FileScan::Csv { options: l }, FileScan::Csv { options: r }) => l == r,
+            #[cfg(feature = "hdf5")]
+            (FileScan::Hdf5 { options: l }, FileScan::Hdf5 { options: r }) => l == r,
             #[cfg(feature = "parquet")]
             (
                 FileScan::Parquet {
@@ -75,6 +85,8 @@ impl Hash for FileScan {
         match self {
             #[cfg(feature = "csv")]
             FileScan::Csv { options } => options.hash(state),
+            #[cfg(feature = "hdf5")]
+            FileScan::Hdf5 { options } => options.hash(state),
             #[cfg(feature = "parquet")]
             FileScan::Parquet {
                 options,
@@ -117,6 +129,8 @@ impl FileScan {
             Self::Ipc { .. } => _file_options.row_index.is_some(),
             #[cfg(feature = "parquet")]
             Self::Parquet { .. } => _file_options.row_index.is_some(),
+            #[cfg(feature = "hdf5")]
+            Self::Hdf5 { .. } => _file_options.row_index.is_some(),
             #[allow(unreachable_patterns)]
             _ => false,
         }
@@ -130,6 +144,9 @@ impl FileScan {
             Self::Ipc { .. } => false,
             #[cfg(feature = "parquet")]
             Self::Parquet { .. } => true,
+            //TODO:Make streamable
+            #[cfg(feature = "hdf5")]
+            Self::Hdf5 { .. } => false,
             #[allow(unreachable_patterns)]
             _ => false,
         }

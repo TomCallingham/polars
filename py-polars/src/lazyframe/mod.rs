@@ -596,6 +596,34 @@ impl PyLazyFrame {
         Ok(())
     }
 
+    #[staticmethod]
+    #[cfg(feature = "hdf5")]
+    #[pyo3(signature = (path, paths, 
+        subgroup,table_format
+    )
+    )]
+    fn new_from_hdf5(
+        path: Option<PathBuf>,
+        paths: Vec<PathBuf>,
+        subgroup: Option<&str>,
+        table_format: Option<&str>,
+    ) -> PyResult<Self> {
+
+
+        let r = if let Some(path) = path.as_ref() {
+            LazyHdf5Reader::new(path)
+        } else {
+            LazyHdf5Reader::new_paths(paths.into())
+        };
+
+        let mut r = r
+            .with_subgroup(subgroup)
+            .with_table_format(table_format);
+
+
+        Ok(r.finish().map_err(PyPolarsErr::from)?.into())
+    }
+
     #[cfg(all(feature = "streaming", feature = "ipc"))]
     #[pyo3(signature = (path, compression, maintain_order))]
     fn sink_ipc(
