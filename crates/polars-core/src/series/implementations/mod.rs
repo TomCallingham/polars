@@ -5,12 +5,8 @@ mod binary_offset;
 mod boolean;
 #[cfg(feature = "dtype-categorical")]
 mod categorical;
-#[cfg(any(
-    feature = "dtype-datetime",
-    feature = "dtype-date",
-    feature = "dtype-time"
-))]
-mod dates_time;
+#[cfg(feature = "dtype-date")]
+mod date;
 #[cfg(feature = "dtype-datetime")]
 mod datetime;
 #[cfg(feature = "dtype-decimal")]
@@ -25,6 +21,8 @@ mod object;
 mod string;
 #[cfg(feature = "dtype-struct")]
 mod struct_;
+#[cfg(feature = "dtype-time")]
+mod time;
 
 use std::any::Any;
 use std::borrow::Cow;
@@ -84,11 +82,11 @@ macro_rules! impl_dyn_series {
                 self.0.ref_field().data_type()
             }
 
-            fn _get_flags(&self) -> Settings {
+            fn _get_flags(&self) -> MetadataFlags {
                 self.0.get_flags()
             }
 
-            fn _set_flags(&mut self, flags: Settings) {
+            fn _set_flags(&mut self, flags: MetadataFlags) {
                 self.0.set_flags(flags)
             }
 
@@ -149,7 +147,10 @@ macro_rules! impl_dyn_series {
             unsafe fn agg_sum(&self, groups: &GroupsProxy) -> Series {
                 use DataType::*;
                 match self.dtype() {
-                    Int8 | UInt8 | Int16 | UInt16 => self.cast(&Int64).unwrap().agg_sum(groups),
+                    Int8 | UInt8 | Int16 | UInt16 => self
+                        .cast(&Int64, CastOptions::Overflowing)
+                        .unwrap()
+                        .agg_sum(groups),
                     _ => self.0.agg_sum(groups),
                 }
             }
@@ -170,18 +171,48 @@ macro_rules! impl_dyn_series {
             }
 
             fn subtract(&self, rhs: &Series) -> PolarsResult<Series> {
+                polars_ensure!(
+                    self.dtype() == rhs.dtype(),
+                    opq = sub,
+                    self.dtype(),
+                    rhs.dtype()
+                );
                 NumOpsDispatch::subtract(&self.0, rhs)
             }
             fn add_to(&self, rhs: &Series) -> PolarsResult<Series> {
+                polars_ensure!(
+                    self.dtype() == rhs.dtype(),
+                    opq = add,
+                    self.dtype(),
+                    rhs.dtype()
+                );
                 NumOpsDispatch::add_to(&self.0, rhs)
             }
             fn multiply(&self, rhs: &Series) -> PolarsResult<Series> {
+                polars_ensure!(
+                    self.dtype() == rhs.dtype(),
+                    opq = mul,
+                    self.dtype(),
+                    rhs.dtype()
+                );
                 NumOpsDispatch::multiply(&self.0, rhs)
             }
             fn divide(&self, rhs: &Series) -> PolarsResult<Series> {
+                polars_ensure!(
+                    self.dtype() == rhs.dtype(),
+                    opq = div,
+                    self.dtype(),
+                    rhs.dtype()
+                );
                 NumOpsDispatch::divide(&self.0, rhs)
             }
             fn remainder(&self, rhs: &Series) -> PolarsResult<Series> {
+                polars_ensure!(
+                    self.dtype() == rhs.dtype(),
+                    opq = rem,
+                    self.dtype(),
+                    rhs.dtype()
+                );
                 NumOpsDispatch::remainder(&self.0, rhs)
             }
             #[cfg(feature = "algorithm_group_by")]
@@ -189,8 +220,12 @@ macro_rules! impl_dyn_series {
                 IntoGroupsProxy::group_tuples(&self.0, multithreaded, sorted)
             }
 
-            fn arg_sort_multiple(&self, options: &SortMultipleOptions) -> PolarsResult<IdxCa> {
-                self.0.arg_sort_multiple(options)
+            fn arg_sort_multiple(
+                &self,
+                by: &[Series],
+                options: &SortMultipleOptions,
+            ) -> PolarsResult<IdxCa> {
+                self.0.arg_sort_multiple(by, options)
             }
         }
 
@@ -238,8 +273,8 @@ macro_rules! impl_dyn_series {
                 self.0.rename(name);
             }
 
-            fn chunk_lengths(&self) -> ChunkIdIter {
-                self.0.chunk_id()
+            fn chunk_lengths(&self) -> ChunkLenIter {
+                self.0.chunk_lengths()
             }
             fn name(&self) -> &str {
                 self.0.name()
@@ -256,7 +291,12 @@ macro_rules! impl_dyn_series {
             }
 
             fn slice(&self, offset: i64, length: usize) -> Series {
-                return self.0.slice(offset, length).into_series();
+                self.0.slice(offset, length).into_series()
+            }
+
+            fn split_at(&self, offset: i64) -> (Series, Series) {
+                let (a, b) = self.0.split_at(offset);
+                (a.into_series(), b.into_series())
             }
 
             fn append(&mut self, other: &Series) -> PolarsResult<()> {
@@ -319,8 +359,8 @@ macro_rules! impl_dyn_series {
                 ChunkExpandAtIndex::new_from_index(&self.0, index, length).into_series()
             }
 
-            fn cast(&self, data_type: &DataType) -> PolarsResult<Series> {
-                self.0.cast(data_type)
+            fn cast(&self, data_type: &DataType, options: CastOptions) -> PolarsResult<Series> {
+                self.0.cast_with_options(data_type, options)
             }
 
             fn get(&self, index: usize) -> PolarsResult<AnyValue> {
@@ -383,30 +423,30 @@ macro_rules! impl_dyn_series {
                 ChunkShift::shift(&self.0, periods).into_series()
             }
 
-            fn _sum_as_series(&self) -> PolarsResult<Series> {
-                Ok(ChunkAggSeries::sum_as_series(&self.0))
+            fn sum_reduce(&self) -> PolarsResult<Scalar> {
+                Ok(ChunkAggSeries::sum_reduce(&self.0))
             }
-            fn max_as_series(&self) -> PolarsResult<Series> {
-                Ok(ChunkAggSeries::max_as_series(&self.0))
+            fn max_reduce(&self) -> PolarsResult<Scalar> {
+                Ok(ChunkAggSeries::max_reduce(&self.0))
             }
-            fn min_as_series(&self) -> PolarsResult<Series> {
-                Ok(ChunkAggSeries::min_as_series(&self.0))
+            fn min_reduce(&self) -> PolarsResult<Scalar> {
+                Ok(ChunkAggSeries::min_reduce(&self.0))
             }
-            fn median_as_series(&self) -> PolarsResult<Series> {
-                Ok(QuantileAggSeries::median_as_series(&self.0))
+            fn median_reduce(&self) -> PolarsResult<Scalar> {
+                Ok(QuantileAggSeries::median_reduce(&self.0))
             }
-            fn var_as_series(&self, ddof: u8) -> PolarsResult<Series> {
-                Ok(VarAggSeries::var_as_series(&self.0, ddof))
+            fn var_reduce(&self, ddof: u8) -> PolarsResult<Scalar> {
+                Ok(VarAggSeries::var_reduce(&self.0, ddof))
             }
-            fn std_as_series(&self, ddof: u8) -> PolarsResult<Series> {
-                Ok(VarAggSeries::std_as_series(&self.0, ddof))
+            fn std_reduce(&self, ddof: u8) -> PolarsResult<Scalar> {
+                Ok(VarAggSeries::std_reduce(&self.0, ddof))
             }
-            fn quantile_as_series(
+            fn quantile_reduce(
                 &self,
                 quantile: f64,
                 interpol: QuantileInterpolOptions,
-            ) -> PolarsResult<Series> {
-                QuantileAggSeries::quantile_as_series(&self.0, quantile, interpol)
+            ) -> PolarsResult<Scalar> {
+                QuantileAggSeries::quantile_reduce(&self.0, quantile, interpol)
             }
 
             fn clone_inner(&self) -> Arc<dyn SeriesTrait> {
@@ -462,7 +502,7 @@ impl private::PrivateSeriesNumeric for SeriesWrap<BooleanChunked> {
     }
     fn bit_repr_small(&self) -> UInt32Chunked {
         self.0
-            .cast(&DataType::UInt32)
+            .cast_with_options(&DataType::UInt32, CastOptions::NonStrict)
             .unwrap()
             .u32()
             .unwrap()

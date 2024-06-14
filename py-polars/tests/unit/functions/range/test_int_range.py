@@ -8,7 +8,14 @@ import polars as pl
 from polars.testing import assert_frame_equal, assert_series_equal
 
 
-def test_arange() -> None:
+def test_int_range() -> None:
+    result = pl.int_range(0, 3)
+    expected = pl.Series("int_range", [0, 1, 2])
+    assert_series_equal(pl.select(int_range=result).to_series(), expected)
+
+
+def test_int_range_alias() -> None:
+    # note: `arange` is an alias for `int_range`
     ldf = pl.LazyFrame({"a": [1, 1, 1]})
     result = ldf.filter(pl.col("a") >= pl.arange(0, 3)).collect()
     expected = pl.DataFrame({"a": [1, 1]})
@@ -29,12 +36,6 @@ def test_int_range_expr() -> None:
     # eager arange
     out2 = pl.arange(0, 10, 2, eager=True)
     assert out2.to_list() == [0, 2, 4, 6, 8]
-
-
-def test_int_range() -> None:
-    result = pl.int_range(0, 3)
-    expected = pl.Series("int_range", [0, 1, 2])
-    assert_series_equal(pl.select(int_range=result).to_series(), expected)
 
 
 def test_int_range_short_syntax() -> None:
@@ -72,7 +73,7 @@ def test_int_range_schema() -> None:
     result = pl.LazyFrame().select(int=pl.int_range(-3, 3))
 
     expected_schema = {"int": pl.Int64}
-    assert result.schema == expected_schema
+    assert result.collect_schema() == expected_schema
     assert result.collect().schema == expected_schema
 
 
@@ -138,7 +139,7 @@ def test_int_ranges_schema_dtype_default() -> None:
     result = lf.select(pl.int_ranges("start", "end"))
 
     expected_schema = {"start": pl.List(pl.Int64)}
-    assert result.schema == expected_schema
+    assert result.collect_schema() == expected_schema
     assert result.collect().schema == expected_schema
 
 
@@ -148,7 +149,7 @@ def test_int_ranges_schema_dtype_arg() -> None:
     result = lf.select(pl.int_ranges("start", "end", dtype=pl.UInt16))
 
     expected_schema = {"start": pl.List(pl.UInt16)}
-    assert result.schema == expected_schema
+    assert result.collect_schema() == expected_schema
     assert result.collect().schema == expected_schema
 
 
@@ -201,7 +202,9 @@ def test_int_range_null_input() -> None:
 
 
 def test_int_range_invalid_conversion() -> None:
-    with pytest.raises(pl.ComputeError, match="conversion from `i32` to `u32` failed"):
+    with pytest.raises(
+        pl.InvalidOperationError, match="conversion from `i32` to `u32` failed"
+    ):
         pl.select(pl.int_range(3, -1, -1, dtype=pl.UInt32))
 
 

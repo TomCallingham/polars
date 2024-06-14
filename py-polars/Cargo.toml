@@ -1,6 +1,6 @@
 [package]
 name = "py-polars"
-version = "0.20.19"
+version = "1.0.0-alpha.1"
 edition = "2021"
 
 [lib]
@@ -10,11 +10,13 @@ crate-type = ["cdylib"]
 [dependencies]
 polars-core = { workspace = true, features = ["python"] }
 polars-error = { workspace = true }
+polars-io = { workspace = true }
 polars-lazy = { workspace = true, features = ["python"] }
 polars-ops = { workspace = true }
 polars-parquet = { workspace = true, optional = true }
 polars-hdf5 = { workspace = true, optional = true }
 polars-plan = { workspace = true }
+polars-time = { workspace = true }
 polars-utils = { workspace = true }
 
 ahash = { workspace = true }
@@ -25,14 +27,17 @@ itoa = { workspace = true }
 libc = "0.2"
 ndarray = { workspace = true }
 num-traits = { workspace = true }
-numpy = { version = "0.20", default-features = false }
+numpy = { version = "0.21", default-features = false }
 once_cell = { workspace = true }
+
 pyo3 = { workspace = true, features = [
   "abi3-py38",
+  "chrono",
   "extension-module",
   "multiple-pymethods",
 ] }
-pyo3-built = { version = "0.4", optional = true }
+recursive = { workspace = true }
+
 serde_json = { workspace = true, optional = true }
 smartstring = { workspace = true }
 thiserror = { workspace = true }
@@ -48,7 +53,9 @@ features = [
   "cum_agg",
   "cumulative_eval",
   "dataframe_arithmetic",
-  "date_offset",
+  "month_start",
+  "month_end",
+  "offset_by",
   "diagonal_concat",
   "diff",
   "dot_diagram",
@@ -57,8 +64,10 @@ features = [
   "dtype-full",
   "dynamic_group_by",
   "ewma",
+  "ewma_by",
   "fmt",
   "interpolate",
+  "interpolate_by",
   "is_first_distinct",
   "is_last_distinct",
   "is_unique",
@@ -79,6 +88,7 @@ features = [
   "reinterpret",
   "replace",
   "rolling_window",
+  "rolling_window_by",
   "round_series",
   "row_hash",
   "rows",
@@ -104,19 +114,14 @@ built = { version = "0.7", features = [
   "cargo-lock",
 ], optional = true }
 
-[target.'cfg(any(not(target_family = "unix"), use_mimalloc))'.dependencies]
+[target.'cfg(all(any(not(target_family = "unix"), allocator = "mimalloc"), not(allocator = "default")))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
-[target.'cfg(all(target_family = "unix", not(use_mimalloc)))'.dependencies]
+[target.'cfg(all(target_family = "unix", not(allocator = "mimalloc"), not(allocator = "default")))'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
 
-# features are only there to enable building a slim binary for the benchmark in CI
 [features]
-# needed for macro
-dtype-i8 = []
-dtype-i16 = []
-dtype-u8 = []
-dtype-u16 = []
+# Features below are only there to enable building a slim binary during development.
 avro = ["polars/avro"]
 parquet = ["polars/parquet", "polars-parquet"]
 hdf5 = ["polars/hdf5", "polars-hdf5"]
@@ -131,50 +136,7 @@ cross_join = ["polars/cross_join"]
 pct_change = ["polars/pct_change"]
 repeat_by = ["polars/repeat_by"]
 # also includes simd
-nightly = ["polars/nightly"]
-streaming = ["polars/streaming"]
-meta = ["polars/meta"]
-search_sorted = ["polars/search_sorted"]
-decompress = ["polars/decompress-fast"]
-regex = ["polars/regex"]
-csv = ["polars/csv"]
-clipboard = ["arboard"]
-object = ["polars/object"]
-extract_jsonpath = ["polars/extract_jsonpath"]
-pivot = ["polars/pivot"]
-top_k = ["polars/top_k"]
-propagate_nans = ["polars/propagate_nans"]
-sql = ["polars/sql"]
-build_info = ["dep:pyo3-built", "dep:built"]
-performant = ["polars/performant"]
-timezones = ["polars/timezones"]
-cse = ["polars/cse"]
-merge_sorted = ["polars/merge_sorted"]
-list_gather = ["polars/list_gather"]
-list_count = ["polars/list_count"]
-array_count = ["polars/array_count", "polars/dtype-array"]
-binary_encoding = ["polars/binary_encoding"]
-list_sets = ["polars-lazy/list_sets"]
-list_any_all = ["polars/list_any_all"]
-array_any_all = ["polars/array_any_all", "polars/dtype-array"]
-list_drop_nulls = ["polars/list_drop_nulls"]
-list_sample = ["polars/list_sample"]
-cutqcut = ["polars/cutqcut"]
-rle = ["polars/rle"]
-extract_groups = ["polars/extract_groups"]
-ffi_plugin = ["polars-plan/ffi_plugin"]
-cloud = [
-  "polars/cloud",
-  "polars/aws",
-  "polars/gcp",
-  "polars/azure",
-  "polars/http",
-]
-peaks = ["polars/peaks"]
-hist = ["polars/hist"]
-find_many = ["polars/find_many"]
 
-dtypes = ["dtype-i8", "dtype-i16", "dtype-u8", "dtype-u16", "object"]
 
 operations = [
   "array_any_all",
@@ -206,6 +168,61 @@ operations = [
   "peaks",
   "hist",
   "find_many",
+]dtype-i8 = []
+nightly = ["polars/nightly"]
+streaming = ["polars/streaming"]
+meta = ["polars/meta"]
+search_sorted = ["polars/search_sorted"]
+decompress = ["polars/decompress-fast"]
+regex = ["polars/regex"]
+csv = ["polars/csv"]
+clipboard = ["arboard"]
+extract_jsonpath = ["polars/extract_jsonpath"]
+pivot = ["polars/pivot"]
+top_k = ["polars/top_k"]
+propagate_nans = ["polars/propagate_nans"]
+sql = ["polars/sql"]
+build_info = ["dep:built"]
+performant = ["polars/performant"]
+timezones = ["polars/timezones"]
+cse = ["polars/cse"]
+merge_sorted = ["polars/merge_sorted"]
+list_gather = ["polars/list_gather"]
+list_count = ["polars/list_count"]
+array_count = ["polars/array_count", "polars/dtype-array"]
+binary_encoding = ["polars/binary_encoding"]
+list_sets = ["polars-lazy/list_sets"]
+list_any_all = ["polars/list_any_all"]
+array_any_all = ["polars/array_any_all", "polars/dtype-array"]
+list_drop_nulls = ["polars/list_drop_nulls"]
+list_sample = ["polars/list_sample"]
+cutqcut = ["polars/cutqcut"]
+rle = ["polars/rle"]
+extract_groups = ["polars/extract_groups"]
+ffi_plugin = ["polars-plan/ffi_plugin"]
+cloud = [
+  "polars/cloud",
+  "polars/aws",
+  "polars/gcp",
+  "polars/azure",
+  "polars/http",
+]
+peaks = ["polars/peaks"]
+hist = ["polars/hist"]
+find_many = ["polars/find_many"]
+new_streaming = ["polars-lazy/new-streaming"]
+dtype-i16 = []
+dtype-u8 = []
+dtype-u16 = []
+dtype-array = []
+object = ["polars/object"]
+dtypes = [
+  "dtype-array",
+  "dtype-i16",
+  "dtype-i8",
+  "dtype-u16",
+  "dtype-u8",
+  "object",
 ]
 
 io = [

@@ -29,6 +29,14 @@ def test_gather_agg_schema() -> None:
         df.lazy()
         .group_by("group", maintain_order=True)
         .agg(pl.col("value").get(1))
-        .schema["value"]
+        .collect_schema()["value"]
         == pl.Int64
     )
+
+
+def test_gather_lit_single_16535() -> None:
+    df = pl.DataFrame({"x": [1, 2, 2, 1], "y": [1, 2, 3, 4]})
+
+    assert df.group_by(["x"], maintain_order=True).agg(pl.all().gather([1])).to_dict(
+        as_series=False
+    ) == {"x": [1, 2], "y": [[4], [3]]}

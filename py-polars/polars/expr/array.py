@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Callable, Sequence
 
-from polars._utils.parse_expr_input import parse_as_expression
+from polars._utils.parse import parse_into_expression
 from polars._utils.wrap import wrap_expr
 
 if TYPE_CHECKING:
@@ -441,7 +441,7 @@ class ExprArrayNameSpace:
         """
         return wrap_expr(self._pyexpr.arr_arg_max())
 
-    def get(self, index: int | IntoExprColumn) -> Expr:
+    def get(self, index: int | IntoExprColumn, *, null_on_oob: bool = False) -> Expr:
         """
         Get the value by index in the sub-arrays.
 
@@ -453,28 +453,32 @@ class ExprArrayNameSpace:
         ----------
         index
             Index to return per sub-array
+        null_on_oob
+            Behavior if an index is out of bounds:
+            True -> set as null
+            False -> raise an error
 
         Examples
         --------
         >>> df = pl.DataFrame(
-        ...     {"arr": [[1, 2, 3], [4, 5, 6], [7, 8, 9]], "idx": [1, -2, 4]},
+        ...     {"arr": [[1, 2, 3], [4, 5, 6], [7, 8, 9]], "idx": [1, -2, 0]},
         ...     schema={"arr": pl.Array(pl.Int32, 3), "idx": pl.Int32},
         ... )
-        >>> df.with_columns(get=pl.col("arr").arr.get("idx"))
+        >>> df.with_columns(get=pl.col("arr").arr.get("idx", null_on_oob=True))
         shape: (3, 3)
-        ┌───────────────┬─────┬──────┐
-        │ arr           ┆ idx ┆ get  │
-        │ ---           ┆ --- ┆ ---  │
-        │ array[i32, 3] ┆ i32 ┆ i32  │
-        ╞═══════════════╪═════╪══════╡
-        │ [1, 2, 3]     ┆ 1   ┆ 2    │
-        │ [4, 5, 6]     ┆ -2  ┆ 5    │
-        │ [7, 8, 9]     ┆ 4   ┆ null │
-        └───────────────┴─────┴──────┘
+        ┌───────────────┬─────┬─────┐
+        │ arr           ┆ idx ┆ get │
+        │ ---           ┆ --- ┆ --- │
+        │ array[i32, 3] ┆ i32 ┆ i32 │
+        ╞═══════════════╪═════╪═════╡
+        │ [1, 2, 3]     ┆ 1   ┆ 2   │
+        │ [4, 5, 6]     ┆ -2  ┆ 5   │
+        │ [7, 8, 9]     ┆ 0   ┆ 7   │
+        └───────────────┴─────┴─────┘
 
         """
-        index = parse_as_expression(index)
-        return wrap_expr(self._pyexpr.arr_get(index))
+        index = parse_into_expression(index)
+        return wrap_expr(self._pyexpr.arr_get(index, null_on_oob))
 
     def first(self) -> Expr:
         """
@@ -499,7 +503,7 @@ class ExprArrayNameSpace:
         └───────────────┴───────┘
 
         """
-        return self.get(0)
+        return self.get(0, null_on_oob=True)
 
     def last(self) -> Expr:
         """
@@ -524,7 +528,7 @@ class ExprArrayNameSpace:
         └───────────────┴──────┘
 
         """
-        return self.get(-1)
+        return self.get(-1, null_on_oob=True)
 
     def join(self, separator: IntoExprColumn, *, ignore_nulls: bool = True) -> Expr:
         """
@@ -568,7 +572,7 @@ class ExprArrayNameSpace:
         └───────────────┴───────────┴──────┘
 
         """
-        separator = parse_as_expression(separator, str_as_lit=True)
+        separator = parse_into_expression(separator, str_as_lit=True)
         return wrap_expr(self._pyexpr.arr_join(separator, ignore_nulls))
 
     def explode(self) -> Expr:
@@ -637,7 +641,7 @@ class ExprArrayNameSpace:
         └───────────────┴──────────┘
 
         """
-        item = parse_as_expression(item, str_as_lit=True)
+        item = parse_into_expression(item, str_as_lit=True)
         return wrap_expr(self._pyexpr.arr_contains(item))
 
     def count_matches(self, element: IntoExpr) -> Expr:
@@ -666,7 +670,7 @@ class ExprArrayNameSpace:
         │ [2, 2]        ┆ 2              │
         └───────────────┴────────────────┘
         """
-        element = parse_as_expression(element, str_as_lit=True)
+        element = parse_into_expression(element, str_as_lit=True)
         return wrap_expr(self._pyexpr.arr_count_matches(element))
 
     def to_struct(
@@ -773,5 +777,5 @@ class ExprArrayNameSpace:
         │ [4, 5, 6]     ┆ [6, null, null] │
         └───────────────┴─────────────────┘
         """
-        n = parse_as_expression(n)
+        n = parse_into_expression(n)
         return wrap_expr(self._pyexpr.arr_shift(n))

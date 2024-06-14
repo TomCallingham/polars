@@ -38,7 +38,7 @@ fn get_scan_columns(
     acc_projections: &mut Vec<ColumnNode>,
     expr_arena: &Arena<AExpr>,
     row_index: Option<&RowIndex>,
-) -> Option<Arc<Vec<String>>> {
+) -> Option<Arc<[String]>> {
     let mut with_columns = None;
     if !acc_projections.is_empty() {
         let mut columns = Vec::with_capacity(acc_projections.len());
@@ -47,7 +47,7 @@ fn get_scan_columns(
             // we shouldn't project the row-count column, as that is generated
             // in the scan
             let push = match row_index {
-                Some(rc) if name.as_ref() != rc.name.as_str() => true,
+                Some(rc) if name != rc.name => true,
                 None => true,
                 _ => false,
             };
@@ -55,7 +55,7 @@ fn get_scan_columns(
                 columns.push((*name).to_owned())
             }
         }
-        with_columns = Some(Arc::new(columns));
+        with_columns = Some(Arc::from(columns));
     }
     with_columns
 }
@@ -155,12 +155,12 @@ impl ProjectionPushDown {
     /// Projection will be done at this node, but we continue optimization
     fn no_pushdown_restart_opt(
         &mut self,
-        lp: FullAccessIR,
+        lp: IR,
         acc_projections: Vec<ColumnNode>,
         projections_seen: usize,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         let inputs = lp.get_inputs();
         let exprs = lp.get_exprs();
 
@@ -182,15 +182,15 @@ impl ProjectionPushDown {
             .collect::<PolarsResult<Vec<_>>>()?;
         let lp = lp.with_exprs_and_input(exprs, new_inputs);
 
-        let builder = FullAccessIRBuilder::from_lp(lp, expr_arena, lp_arena);
+        let builder = IRBuilder::from_lp(lp, expr_arena, lp_arena);
         Ok(self.finish_node_simple_projection(&acc_projections, builder))
     }
 
     fn finish_node_simple_projection(
         &mut self,
         local_projections: &[ColumnNode],
-        builder: FullAccessIRBuilder,
-    ) -> FullAccessIR {
+        builder: IRBuilder,
+    ) -> IR {
         if !local_projections.is_empty() {
             builder
                 .project_simple_nodes(local_projections.iter().map(|node| node.0))
@@ -201,11 +201,7 @@ impl ProjectionPushDown {
         }
     }
 
-    fn finish_node(
-        &mut self,
-        local_projections: Vec<ExprIR>,
-        builder: FullAccessIRBuilder,
-    ) -> FullAccessIR {
+    fn finish_node(&mut self, local_projections: Vec<ExprIR>, builder: IRBuilder) -> IR {
         if !local_projections.is_empty() {
             builder
                 .project(local_projections, Default::default())
@@ -257,7 +253,7 @@ impl ProjectionPushDown {
         acc_projections: Vec<ColumnNode>,
         names: PlHashSet<Arc<str>>,
         projections_seen: usize,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
     ) -> PolarsResult<()> {
         let alp = lp_arena.take(input);
@@ -283,7 +279,7 @@ impl ProjectionPushDown {
         input: Node,
         acc_projections: Vec<ColumnNode>,
         projections_seen: usize,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
         // an unnest changes/expands the schema
         expands_schema: bool,
@@ -310,7 +306,7 @@ impl ProjectionPushDown {
     ///
     /// # Arguments
     ///
-    /// * `FullAccessIR` - Arena based logical plan tree representing the query.
+    /// * `IR` - Arena based logical plan tree representing the query.
     /// * `acc_projections` - The projections we accumulate during tree traversal.
     /// * `names` - We keep track of the names to ensure we don't do duplicate projections.
     /// * `projections_seen` - Count the number of projection operations during tree traversal.
@@ -319,20 +315,22 @@ impl ProjectionPushDown {
     #[recursive]
     fn push_down(
         &mut self,
-        logical_plan: FullAccessIR,
+        logical_plan: IR,
         mut acc_projections: Vec<ColumnNode>,
         mut projected_names: PlHashSet<Arc<str>>,
         projections_seen: usize,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
-        use FullAccessIR::*;
+    ) -> PolarsResult<IR> {
+        use IR::*;
 
         match logical_plan {
+            // Should not yet be here
+            Reduce { .. } => unreachable!(),
             Select { expr, input, .. } => process_projection(
                 self,
                 input,
-                expr.exprs(),
+                expr,
                 acc_projections,
                 projected_names,
                 projections_seen,
@@ -356,10 +354,9 @@ impl ProjectionPushDown {
                 df,
                 schema,
                 mut output_schema,
-                selection,
+                filter: selection,
                 ..
             } => {
-                let mut projection = None;
                 if !acc_projections.is_empty() {
                     output_schema = Some(Arc::new(update_scan_schema(
                         &acc_projections,
@@ -367,14 +364,12 @@ impl ProjectionPushDown {
                         &schema,
                         false,
                     )?));
-                    projection = get_scan_columns(&mut acc_projections, expr_arena, None);
                 }
                 let lp = DataFrameScan {
                     df,
                     schema,
                     output_schema,
-                    projection,
-                    selection,
+                    filter: selection,
                 };
                 Ok(lp)
             },
@@ -455,7 +450,8 @@ impl ProjectionPushDown {
             Sort {
                 input,
                 by_column,
-                args,
+                slice,
+                sort_options,
             } => {
                 if !acc_projections.is_empty() {
                     // Make sure that the column(s) used for the sort is projected
@@ -480,7 +476,8 @@ impl ProjectionPushDown {
                 Ok(Sort {
                     input,
                     by_column,
-                    args,
+                    slice,
+                    sort_options,
                 })
             },
             Distinct { input, options } => {
@@ -607,7 +604,7 @@ impl ProjectionPushDown {
             } => process_hstack(
                 self,
                 input,
-                exprs.exprs(),
+                exprs,
                 options,
                 acc_projections,
                 projected_names,
@@ -651,10 +648,7 @@ impl ProjectionPushDown {
                     schema: Arc::new(new_schema),
                 })
             },
-            MapFunction {
-                input,
-                ref function,
-            } => functions::process_functions(
+            MapFunction { input, function } => functions::process_functions(
                 self,
                 input,
                 function,
@@ -705,12 +699,10 @@ impl ProjectionPushDown {
                 if acc_projections.is_empty() {
                     Ok(logical_plan)
                 } else {
-                    Ok(
-                        FullAccessIRBuilder::from_lp(logical_plan, expr_arena, lp_arena)
-                            .project_simple_nodes(acc_projections)
-                            .unwrap()
-                            .build(),
-                    )
+                    Ok(IRBuilder::from_lp(logical_plan, expr_arena, lp_arena)
+                        .project_simple_nodes(acc_projections)
+                        .unwrap()
+                        .build())
                 }
             },
             Invalid => unreachable!(),
@@ -719,10 +711,10 @@ impl ProjectionPushDown {
 
     pub fn optimize(
         &mut self,
-        logical_plan: FullAccessIR,
-        lp_arena: &mut Arena<FullAccessIR>,
+        logical_plan: IR,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         let acc_projections = init_vec();
         let names = init_set();
         self.push_down(

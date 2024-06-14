@@ -1,7 +1,6 @@
 use polars_core::prelude::*;
 use recursive::recursive;
 
-use crate::logical_plan::projection_expr::ProjectionExprs;
 use crate::prelude::*;
 
 pub(super) struct SlicePushDown {
@@ -21,10 +20,7 @@ struct State {
 /// * projections not based on any column project as scalars
 ///
 /// Returns (all_elementwise, all_elementwise_and_any_expr_has_column)
-fn can_pushdown_slice_past_projections(
-    exprs: &ProjectionExprs,
-    arena: &Arena<AExpr>,
-) -> (bool, bool) {
+fn can_pushdown_slice_past_projections(exprs: &[ExprIR], arena: &Arena<AExpr>) -> (bool, bool) {
     let mut all_elementwise_and_any_expr_has_column = false;
     for expr_ir in exprs.iter() {
         // `select(c = Literal([1, 2, 3])).slice(0, 0)` must block slice pushdown,
@@ -70,15 +66,15 @@ impl SlicePushDown {
     // we also stop optimization
     fn no_pushdown_finish_opt(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         state: Option<State>,
-        lp_arena: &mut Arena<FullAccessIR>,
-    ) -> PolarsResult<FullAccessIR> {
+        lp_arena: &mut Arena<IR>,
+    ) -> PolarsResult<IR> {
         match state {
             Some(state) => {
                 let input = lp_arena.add(lp);
 
-                let lp = FullAccessIR::Slice {
+                let lp = IR::Slice {
                     input,
                     offset: state.offset,
                     len: state.len,
@@ -92,11 +88,11 @@ impl SlicePushDown {
     /// slice will be done at this node, but we continue optimization
     fn no_pushdown_restart_opt(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         state: Option<State>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         let inputs = lp.get_inputs();
         let exprs = lp.get_exprs();
 
@@ -119,11 +115,11 @@ impl SlicePushDown {
     /// slice will be pushed down.
     fn pushdown_and_continue(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         state: Option<State>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         let inputs = lp.get_inputs();
         let exprs = lp.get_exprs();
 
@@ -142,12 +138,12 @@ impl SlicePushDown {
     #[recursive]
     fn pushdown(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         state: Option<State>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
-        use FullAccessIR::*;
+    ) -> PolarsResult<IR> {
+        use IR::*;
 
         match (lp, state) {
             #[cfg(feature = "python")]
@@ -170,22 +166,22 @@ impl SlicePushDown {
                 paths,
                 file_info,
                 output_schema,
-                file_options: mut options,
+                mut file_options,
                 predicate,
-                scan_type: FileScan::Csv {options: mut csv_options}
+                scan_type: FileScan::Csv { options, cloud_options },
             }, Some(state)) if predicate.is_none() && state.offset >= 0 =>  {
-                options.n_rows = Some(state.len as usize);
-                csv_options.skip_rows += state.offset as usize;
+                file_options.n_rows = Some(state.offset as usize + state.len as usize);
 
                 let lp = Scan {
                     paths,
                     file_info,
                     output_schema,
-                    scan_type: FileScan::Csv {options: csv_options},
-                    file_options: options,
+                    scan_type: FileScan::Csv { options, cloud_options },
+                    file_options,
                     predicate,
                 };
-                Ok(lp)
+
+                self.no_pushdown_finish_opt(lp, Some(state), lp_arena)
             },
             // TODO! we currently skip slice pushdown if there is a predicate.
             (Scan {
@@ -209,7 +205,6 @@ impl SlicePushDown {
                 Ok(lp)
             }
             (Union {mut inputs, mut options }, Some(state)) => {
-                options.slice = Some((state.offset, state.len as usize));
                 if state.offset == 0 {
                     for input in &mut inputs {
                         let input_lp = lp_arena.take(*input);
@@ -217,7 +212,17 @@ impl SlicePushDown {
                         lp_arena.replace(*input, input_lp);
                     }
                 }
-                Ok(Union {inputs, options})
+                // The in-memory union node is slice aware.
+                // We still set this information, but the streaming engine will ignore it.
+                options.slice = Some((state.offset, state.len as usize));
+                let lp = Union {inputs, options};
+
+                if self.streaming {
+                    // Ensure the slice node remains.
+                    self.no_pushdown_finish_opt(lp, Some(state), lp_arena)
+                } else {
+                    Ok(lp)
+                }
             },
             (Join {
                 input_left,
@@ -280,17 +285,19 @@ impl SlicePushDown {
                     options,
                 })
             }
-            (Sort {input, by_column, mut args}, Some(state)) => {
+            (Sort {input, by_column, mut slice,
+                sort_options}, Some(state)) => {
                 // first restart optimization in inputs and get the updated LP
                 let input_lp = lp_arena.take(input);
                 let input_lp = self.pushdown(input_lp, None, lp_arena, expr_arena)?;
                 let input= lp_arena.add(input_lp);
 
-                args.slice = Some((state.offset, state.len as usize));
+                slice = Some((state.offset, state.len as usize));
                 Ok(Sort {
                     input,
                     by_column,
-                    args
+                    slice,
+                    sort_options
                 })
             }
             (Slice {
@@ -410,10 +417,10 @@ impl SlicePushDown {
 
     pub fn optimize(
         &self,
-        logical_plan: FullAccessIR,
-        lp_arena: &mut Arena<FullAccessIR>,
+        logical_plan: IR,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         self.pushdown(logical_plan, None, lp_arena, expr_arena)
     }
 }

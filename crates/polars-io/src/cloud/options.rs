@@ -34,6 +34,8 @@ use smartstring::alias::String as SmartString;
 #[cfg(feature = "cloud")]
 use url::Url;
 
+#[cfg(feature = "file_cache")]
+use crate::file_cache::get_env_file_cache_ttl;
 #[cfg(feature = "aws")]
 use crate::pl_async::with_concurrency_budget;
 #[cfg(feature = "aws")]
@@ -56,19 +58,23 @@ type Configs<T> = Vec<(T, String)>;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 /// Options to connect to various cloud providers.
 pub struct CloudOptions {
+    pub max_retries: usize,
+    #[cfg(feature = "file_cache")]
+    pub file_cache_ttl: u64,
     #[cfg(feature = "aws")]
     aws: Option<Configs<AmazonS3ConfigKey>>,
     #[cfg(feature = "azure")]
     azure: Option<Configs<AzureConfigKey>>,
     #[cfg(feature = "gcp")]
     gcp: Option<Configs<GoogleConfigKey>>,
-    pub max_retries: usize,
 }
 
 impl Default for CloudOptions {
     fn default() -> Self {
         Self {
             max_retries: 2,
+            #[cfg(feature = "file_cache")]
+            file_cache_ttl: get_env_file_cache_ttl(),
             #[cfg(feature = "aws")]
             aws: Default::default(),
             #[cfg(feature = "azure")]
@@ -188,7 +194,7 @@ fn read_config(
             continue;
         }
 
-        let mut config = std::fs::File::open(&resolve_homedir(path)).ok()?;
+        let mut config = std::fs::File::open(resolve_homedir(path)).ok()?;
         let mut buf = vec![];
         config.read_to_end(&mut buf).ok()?;
         let content = std::str::from_utf8(buf.as_ref()).ok()?;
@@ -429,10 +435,10 @@ impl CloudOptions {
 #[cfg(feature = "cloud")]
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::parse_url;
 
     #[test]
-    fn test_parse_path() {
+    fn test_parse_url() {
         assert_eq!(
             parse_url(r"http://Users/Jane Doe/data.csv")
                 .unwrap()

@@ -10,8 +10,6 @@ mod parquet;
 #[cfg(feature = "ipc")]
 mod support;
 use std::mem;
-#[cfg(any(feature = "parquet", feature = "ipc", feature = "cse"))]
-use std::ops::Deref;
 
 #[cfg(feature = "csv")]
 pub(crate) use csv::CsvExec;
@@ -28,8 +26,6 @@ use polars_plan::global::_set_n_rows_for_scan;
 pub(crate) use support::ConsecutiveCountState;
 
 use super::*;
-#[cfg(any(feature = "ipc", feature = "parquet"))]
-use crate::physical_plan::expressions::phys_expr_to_io_expr;
 use crate::prelude::*;
 
 #[cfg(any(feature = "ipc", feature = "parquet"))]
@@ -40,7 +36,7 @@ type Predicate = Option<Arc<dyn PhysicalIoExpr>>;
 #[cfg(any(feature = "ipc", feature = "parquet"))]
 fn prepare_scan_args(
     predicate: Option<Arc<dyn PhysicalExpr>>,
-    with_columns: &mut Option<Arc<Vec<String>>>,
+    with_columns: &mut Option<Arc<[String]>>,
     schema: &mut SchemaRef,
     has_row_index: bool,
     hive_partitions: Option<&[Series]>,
@@ -49,7 +45,7 @@ fn prepare_scan_args(
     let schema = mem::take(schema);
 
     let projection = materialize_projection(
-        with_columns.as_deref().map(|cols| cols.deref()),
+        with_columns.as_deref(),
         &schema,
         hive_partitions,
         has_row_index,
@@ -63,8 +59,8 @@ fn prepare_scan_args(
 /// Producer of an in memory DataFrame
 pub struct DataFrameExec {
     pub(crate) df: Arc<DataFrame>,
-    pub(crate) selection: Option<Arc<dyn PhysicalExpr>>,
-    pub(crate) projection: Option<Arc<Vec<String>>>,
+    pub(crate) filter: Option<Arc<dyn PhysicalExpr>>,
+    pub(crate) projection: Option<Vec<SmartString>>,
     pub(crate) predicate_has_windows: bool,
 }
 
@@ -76,10 +72,10 @@ impl Executor for DataFrameExec {
         // projection should be before selection as those are free
         // TODO: this is only the case if we don't create new columns
         if let Some(projection) = &self.projection {
-            df = df.select(projection.as_ref())?;
+            df = df.select(projection.as_slice())?;
         }
 
-        if let Some(selection) = &self.selection {
+        if let Some(selection) = &self.filter {
             if self.predicate_has_windows {
                 state.insert_has_window_function_flag()
             }

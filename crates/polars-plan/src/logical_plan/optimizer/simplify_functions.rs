@@ -1,3 +1,5 @@
+use polars_core::chunked_array::cast::CastOptions;
+
 use super::*;
 
 pub(super) fn optimize_functions(
@@ -23,12 +25,17 @@ pub(super) fn optimize_functions(
                 AExpr::SortBy {
                     expr,
                     by,
-                    descending,
-                } => Some(AExpr::SortBy {
-                    expr: *expr,
-                    by: by.clone(),
-                    descending: descending.iter().map(|r| !*r).collect(),
-                }),
+                    sort_options,
+                } => {
+                    let mut sort_options = sort_options.clone();
+                    let reversed_descending = sort_options.descending.iter().map(|x| !*x).collect();
+                    sort_options.descending = reversed_descending;
+                    Some(AExpr::SortBy {
+                        expr: *expr,
+                        by: by.clone(),
+                        sort_options,
+                    })
+                },
                 // TODO: add support for cum_sum and other operation that allow reversing.
                 _ => None,
             }
@@ -65,7 +72,7 @@ pub(super) fn optimize_functions(
                 Some(AExpr::Cast {
                     expr: input[0].node(),
                     data_type: DataType::Boolean,
-                    strict: false,
+                    options: CastOptions::NonStrict,
                 })
             } else {
                 None

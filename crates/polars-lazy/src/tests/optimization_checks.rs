@@ -1,3 +1,5 @@
+use polars_ops::prelude::JoinCoalesce;
+
 use super::*;
 
 #[cfg(feature = "parquet")]
@@ -6,7 +8,7 @@ pub(crate) fn row_index_at_scan(q: LazyFrame) -> bool {
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
 
     (&lp_arena).iter(lp).any(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         matches!(
             lp,
             Scan {
@@ -25,11 +27,11 @@ pub(crate) fn predicate_at_scan(q: LazyFrame) -> bool {
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
 
     (&lp_arena).iter(lp).any(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         matches!(
             lp,
             DataFrameScan {
-                selection: Some(_),
+                filter: Some(_),
                 ..
             } | Scan {
                 predicate: Some(_),
@@ -44,11 +46,11 @@ pub(crate) fn predicate_at_all_scans(q: LazyFrame) -> bool {
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
 
     (&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         matches!(
             lp,
             DataFrameScan {
-                selection: Some(_),
+                filter: Some(_),
                 ..
             } | Scan {
                 predicate: Some(_),
@@ -64,7 +66,7 @@ pub(crate) fn is_pipeline(q: LazyFrame) -> bool {
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
     matches!(
         lp_arena.get(lp),
-        FullAccessIR::MapFunction {
+        IR::MapFunction {
             function: FunctionNode::Pipeline { .. },
             ..
         }
@@ -78,7 +80,7 @@ pub(crate) fn has_pipeline(q: LazyFrame) -> bool {
     (&lp_arena).iter(lp).any(|(_, lp)| {
         matches!(
             lp,
-            FullAccessIR::MapFunction {
+            IR::MapFunction {
                 function: FunctionNode::Pipeline { .. },
                 ..
             }
@@ -91,7 +93,7 @@ fn slice_at_scan(q: LazyFrame) -> bool {
     let (mut expr_arena, mut lp_arena) = get_arenas();
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
     (&lp_arena).iter(lp).any(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
             Scan { file_options, .. } => file_options.n_rows.is_some(),
             _ => false,
@@ -154,7 +156,11 @@ fn test_no_left_join_pass() -> PolarsResult<()> {
             df2.lazy(),
             [col("idx1")],
             [col("idx2")],
-            JoinType::Left.into(),
+            JoinArgs {
+                how: JoinType::Left,
+                coalesce: JoinCoalesce::CoalesceColumns,
+                ..Default::default()
+            },
         )
         .filter(col("bar").eq(lit(5i32)))
         .collect()?;
@@ -202,7 +208,11 @@ pub fn test_slice_pushdown_join() -> PolarsResult<()> {
             q2,
             [col("category")],
             [col("category")],
-            JoinType::Left.into(),
+            JoinArgs {
+                how: JoinType::Left,
+                coalesce: JoinCoalesce::CoalesceColumns,
+                ..Default::default()
+            },
         )
         .slice(1, 3)
         // this inserts a cache and blocks slice pushdown
@@ -213,7 +223,7 @@ pub fn test_slice_pushdown_join() -> PolarsResult<()> {
     let (mut expr_arena, mut lp_arena) = get_arenas();
     let lp = q.clone().optimize(&mut lp_arena, &mut expr_arena).unwrap();
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
             Join { options, .. } => options.args.slice == Some((1, 3)),
             Slice { .. } => false,
@@ -243,7 +253,7 @@ pub fn test_slice_pushdown_group_by() -> PolarsResult<()> {
     let (mut expr_arena, mut lp_arena) = get_arenas();
     let lp = q.clone().optimize(&mut lp_arena, &mut expr_arena).unwrap();
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
             GroupBy { options, .. } => options.slice == Some((1, 3)),
             Slice { .. } => false,
@@ -262,7 +272,9 @@ pub fn test_slice_pushdown_sort() -> PolarsResult<()> {
     let _guard = SINGLE_LOCK.lock().unwrap();
     let q = scan_foods_parquet(false).limit(100);
 
-    let q = q.sort("category", SortOptions::default()).slice(1, 3);
+    let q = q
+        .sort(["category"], SortMultipleOptions::default())
+        .slice(1, 3);
 
     // test if optimization continued beyond the sort node
     assert!(slice_at_scan(q.clone()));
@@ -270,9 +282,9 @@ pub fn test_slice_pushdown_sort() -> PolarsResult<()> {
     let (mut expr_arena, mut lp_arena) = get_arenas();
     let lp = q.clone().optimize(&mut lp_arena, &mut expr_arena).unwrap();
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
-            Sort { args, .. } => args.slice == Some((1, 3)),
+            Sort { slice, .. } => *slice == Some((1, 3)),
             Slice { .. } => false,
             _ => true,
         }
@@ -293,12 +305,12 @@ pub fn test_predicate_block_cast() -> PolarsResult<()> {
     let lf1 = df
         .clone()
         .lazy()
-        .with_column(col("value").cast(DataType::Int16) * lit(0.1f32))
+        .with_column(col("value").cast(DataType::Int16) * lit(0.1).cast(DataType::Float32))
         .filter(col("value").lt(lit(2.5f32)));
 
     let lf2 = df
         .lazy()
-        .select([col("value").cast(DataType::Int16) * lit(0.1f32)])
+        .select([col("value").cast(DataType::Int16) * lit(0.1).cast(DataType::Float32)])
         .filter(col("value").lt(lit(2.5f32)));
 
     for lf in [lf1, lf2] {
@@ -466,13 +478,12 @@ fn test_with_column_prune() -> PolarsResult<()> {
         .select([col("c1"), col("c4")]);
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
     (&lp_arena).iter(lp).for_each(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
-            DataFrameScan { projection, .. } => {
-                let projection = projection.as_ref().unwrap();
-                let projection = projection.as_slice();
+            DataFrameScan { output_schema, .. } => {
+                let projection = output_schema.as_ref().unwrap();
                 assert_eq!(projection.len(), 1);
-                let name = &projection[0];
+                let name = projection.get_at_index(0).unwrap().0;
                 assert_eq!(name, "c1");
             },
             HStack { exprs, .. } => {
@@ -483,18 +494,15 @@ fn test_with_column_prune() -> PolarsResult<()> {
     });
 
     // whole `with_columns` pruned
-    let q = df.lazy().with_column(col("c0")).select([col("c1")]);
+    let mut q = df.lazy().with_column(col("c0")).select([col("c1")]);
 
     let lp = q.clone().optimize(&mut lp_arena, &mut expr_arena).unwrap();
 
     // check if with_column is pruned
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
 
-        matches!(
-            lp,
-            FullAccessIR::SimpleProjection { .. } | DataFrameScan { .. }
-        )
+        matches!(lp, SimpleProjection { .. } | DataFrameScan { .. })
     }));
     assert_eq!(
         q.schema().unwrap().as_ref(),
@@ -541,11 +549,155 @@ fn test_flatten_unions() -> PolarsResult<()> {
     let root = lf4.optimize(&mut lp_arena, &mut expr_arena).unwrap();
     let lp = lp_arena.get(root);
     match lp {
-        FullAccessIR::Union { inputs, .. } => {
+        IR::Union { inputs, .. } => {
             // we make sure that the nested unions are flattened into a single union
             assert_eq!(inputs.len(), 5);
         },
         _ => panic!(),
     }
+    Ok(())
+}
+
+fn num_occurrences(s: &str, needle: &str) -> usize {
+    let mut i = 0;
+    let mut num = 0;
+
+    while let Some(n) = s[i..].find(needle) {
+        i += n + 1;
+        num += 1;
+    }
+
+    num
+}
+
+#[test]
+fn test_cluster_with_columns() -> Result<(), Box<dyn std::error::Error>> {
+    use polars_core::prelude::*;
+
+    let df = df!("foo" => &[0.5, 1.7, 3.2],
+                 "bar" => &[4.1, 1.5, 9.2])?;
+
+    let df = df
+        .lazy()
+        .without_optimizations()
+        .with_cluster_with_columns(true)
+        .with_columns([col("foo") * lit(2.0)])
+        .with_columns([col("bar") / lit(1.5)]);
+
+    let unoptimized = df.clone().to_alp().unwrap();
+    let optimized = df.clone().to_alp_optimized().unwrap();
+
+    let unoptimized = unoptimized.describe();
+    let optimized = optimized.describe();
+
+    println!("\n---\n");
+
+    println!("Unoptimized:\n{unoptimized}",);
+    println!("\n---\n");
+    println!("Optimized:\n{optimized}");
+
+    assert_eq!(num_occurrences(&unoptimized, "WITH_COLUMNS"), 2);
+    assert_eq!(num_occurrences(&optimized, "WITH_COLUMNS"), 1);
+
+    Ok(())
+}
+
+#[test]
+fn test_cluster_with_columns_dependency() -> Result<(), Box<dyn std::error::Error>> {
+    use polars_core::prelude::*;
+
+    let df = df!("foo" => &[0.5, 1.7, 3.2],
+                 "bar" => &[4.1, 1.5, 9.2])?;
+
+    let df = df
+        .lazy()
+        .without_optimizations()
+        .with_cluster_with_columns(true)
+        .with_columns([col("foo").alias("buzz")])
+        .with_columns([col("buzz")]);
+
+    let unoptimized = df.clone().to_alp().unwrap();
+    let optimized = df.clone().to_alp_optimized().unwrap();
+
+    let unoptimized = unoptimized.describe();
+    let optimized = optimized.describe();
+
+    println!("\n---\n");
+
+    println!("Unoptimized:\n{unoptimized}",);
+    println!("\n---\n");
+    println!("Optimized:\n{optimized}");
+
+    assert_eq!(num_occurrences(&unoptimized, "WITH_COLUMNS"), 2);
+    assert_eq!(num_occurrences(&optimized, "WITH_COLUMNS"), 2);
+
+    Ok(())
+}
+
+#[test]
+fn test_cluster_with_columns_partial() -> Result<(), Box<dyn std::error::Error>> {
+    use polars_core::prelude::*;
+
+    let df = df!("foo" => &[0.5, 1.7, 3.2],
+                 "bar" => &[4.1, 1.5, 9.2])?;
+
+    let df = df
+        .lazy()
+        .without_optimizations()
+        .with_cluster_with_columns(true)
+        .with_columns([col("foo").alias("buzz")])
+        .with_columns([col("buzz"), col("foo") * lit(2.0)]);
+
+    let unoptimized = df.clone().to_alp().unwrap();
+    let optimized = df.clone().to_alp_optimized().unwrap();
+
+    let unoptimized = unoptimized.describe();
+    let optimized = optimized.describe();
+
+    println!("\n---\n");
+
+    println!("Unoptimized:\n{unoptimized}",);
+    println!("\n---\n");
+    println!("Optimized:\n{optimized}");
+
+    assert!(unoptimized.contains(r#"[col("buzz"), [(col("foo")) * (2.0)]]"#));
+    assert!(unoptimized.contains(r#"[col("foo").alias("buzz")]"#));
+    assert!(optimized.contains(r#"[col("buzz")]"#));
+    assert!(optimized.contains(r#"[col("foo").alias("buzz"), [(col("foo")) * (2.0)]]"#));
+
+    Ok(())
+}
+
+#[test]
+fn test_cluster_with_columns_chain() -> Result<(), Box<dyn std::error::Error>> {
+    use polars_core::prelude::*;
+
+    let df = df!("foo" => &[0.5, 1.7, 3.2],
+                 "bar" => &[4.1, 1.5, 9.2])?;
+
+    let df = df
+        .lazy()
+        .without_optimizations()
+        .with_cluster_with_columns(true)
+        .with_columns([col("foo").alias("foo1")])
+        .with_columns([col("foo").alias("foo2")])
+        .with_columns([col("foo").alias("foo3")])
+        .with_columns([col("foo").alias("foo4")]);
+
+    let unoptimized = df.clone().to_alp().unwrap();
+    let optimized = df.clone().to_alp_optimized().unwrap();
+
+    let unoptimized = unoptimized.describe();
+    let optimized = optimized.describe();
+
+    println!("\n---\n");
+
+    println!("Unoptimized:\n{unoptimized}",);
+    println!("\n---\n");
+    println!("Optimized:\n{optimized}");
+
+    assert_eq!(num_occurrences(&unoptimized, "WITH_COLUMNS"), 4);
+    assert_eq!(num_occurrences(&optimized, "WITH_COLUMNS"), 1);
+
     Ok(())
 }

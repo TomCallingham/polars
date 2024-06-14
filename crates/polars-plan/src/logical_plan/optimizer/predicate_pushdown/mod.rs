@@ -41,16 +41,16 @@ impl<'a> PredicatePushDown<'a> {
 
     fn optional_apply_predicate(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         local_predicates: Vec<ExprIR>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> FullAccessIR {
+    ) -> IR {
         if !local_predicates.is_empty() {
             let predicate = combine_predicates(local_predicates.into_iter(), expr_arena);
             let input = lp_arena.add(lp);
 
-            FullAccessIR::Filter { input, predicate }
+            IR::Filter { input, predicate }
         } else {
             lp
         }
@@ -60,7 +60,7 @@ impl<'a> PredicatePushDown<'a> {
         &self,
         input: Node,
         acc_predicates: PlHashMap<Arc<str>, ExprIR>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
     ) -> PolarsResult<()> {
         let alp = lp_arena.take(input);
@@ -72,20 +72,20 @@ impl<'a> PredicatePushDown<'a> {
     /// Filter will be pushed down.
     fn pushdown_and_continue(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         mut acc_predicates: PlHashMap<Arc<str>, ExprIR>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
         has_projections: bool,
-    ) -> PolarsResult<FullAccessIR> {
-        let inputs = lp.get_inputs();
+    ) -> PolarsResult<IR> {
+        let inputs = lp.get_inputs_vec();
         let exprs = lp.get_exprs();
 
         if has_projections {
             // projections should only have a single input.
             if inputs.len() > 1 {
                 // except for ExtContext
-                assert!(matches!(lp, FullAccessIR::ExtContext { .. }));
+                assert!(matches!(lp, IR::ExtContext { .. }));
             }
             let input = inputs[inputs.len() - 1];
 
@@ -187,11 +187,11 @@ impl<'a> PredicatePushDown<'a> {
     /// Filter will be done at this node, but we continue optimization
     fn no_pushdown_restart_opt(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         acc_predicates: PlHashMap<Arc<str>, ExprIR>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         let inputs = lp.get_inputs();
         let exprs = lp.get_exprs();
 
@@ -218,11 +218,11 @@ impl<'a> PredicatePushDown<'a> {
 
     fn no_pushdown(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         acc_predicates: PlHashMap<Arc<str>, ExprIR>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         // all predicates are done locally
         let local_predicates = acc_predicates.into_values().collect::<Vec<_>>();
         Ok(self.optional_apply_predicate(lp, local_predicates, lp_arena, expr_arena))
@@ -232,7 +232,7 @@ impl<'a> PredicatePushDown<'a> {
     ///
     /// # Arguments
     ///
-    /// * `FullAccessIR` - Arena based logical plan tree representing the query.
+    /// * `IR` - Arena based logical plan tree representing the query.
     /// * `acc_predicates` - The predicates we accumulate during tree traversal.
     ///                      The hashmap maps from leaf-column name to predicates on that column.
     ///                      If the key is already taken we combine the predicate with a bitand operation.
@@ -242,12 +242,12 @@ impl<'a> PredicatePushDown<'a> {
     #[recursive]
     fn push_down(
         &self,
-        lp: FullAccessIR,
+        lp: IR,
         mut acc_predicates: PlHashMap<Arc<str>, ExprIR>,
-        lp_arena: &mut Arena<FullAccessIR>,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
-        use FullAccessIR::*;
+    ) -> PolarsResult<IR> {
+        use IR::*;
 
         match lp {
             Filter {
@@ -307,16 +307,14 @@ impl<'a> PredicatePushDown<'a> {
                 df,
                 schema,
                 output_schema,
-                projection,
-                selection,
+                filter: selection,
             } => {
                 let selection = predicate_at_scan(acc_predicates, selection, expr_arena);
                 let lp = DataFrameScan {
                     df,
                     schema,
                     output_schema,
-                    projection,
-                    selection,
+                    filter: selection,
                 };
                 Ok(lp)
             },
@@ -342,12 +340,9 @@ impl<'a> PredicatePushDown<'a> {
                         // not update the row index properly before applying the
                         // predicate (e.g. FileScan::Csv doesn't).
                         if let Some(ref row_index) = options.row_index {
-                            let row_index_predicates = transfer_to_local_by_name(
-                                expr_arena,
-                                &mut acc_predicates,
-                                |name| name.as_ref() == row_index.name,
-                            );
-                            row_index_predicates
+                            transfer_to_local_by_name(expr_arena, &mut acc_predicates, |name| {
+                                name == row_index.name
+                            })
                         } else {
                             vec![]
                         }
@@ -393,8 +388,7 @@ impl<'a> PredicatePushDown<'a> {
                                     df: Arc::new(df),
                                     schema: schema.clone(),
                                     output_schema: None,
-                                    projection: None,
-                                    selection: None,
+                                    filter: None,
                                 });
                             } else {
                                 paths = Arc::from(new_paths)
@@ -625,6 +619,7 @@ impl<'a> PredicatePushDown<'a> {
             },
             lp @ HStack { .. }
             | lp @ Select { .. }
+            | lp @ Reduce { .. }
             | lp @ SimpleProjection { .. }
             | lp @ ExtContext { .. } => {
                 self.pushdown_and_continue(lp, acc_predicates, lp_arena, expr_arena, true)
@@ -716,10 +711,10 @@ impl<'a> PredicatePushDown<'a> {
 
     pub(crate) fn optimize(
         &self,
-        logical_plan: FullAccessIR,
-        lp_arena: &mut Arena<FullAccessIR>,
+        logical_plan: IR,
+        lp_arena: &mut Arena<IR>,
         expr_arena: &mut Arena<AExpr>,
-    ) -> PolarsResult<FullAccessIR> {
+    ) -> PolarsResult<IR> {
         let acc_predicates = PlHashMap::new();
         self.push_down(logical_plan, acc_predicates, lp_arena, expr_arena)
     }

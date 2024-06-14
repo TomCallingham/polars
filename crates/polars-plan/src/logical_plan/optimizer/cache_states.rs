@@ -4,20 +4,28 @@ use super::*;
 
 fn get_upper_projections(
     parent: Node,
-    lp_arena: &Arena<FullAccessIR>,
+    lp_arena: &Arena<IR>,
+    expr_arena: &Arena<AExpr>,
     names_scratch: &mut Vec<ColumnName>,
+    found_required_columns: &mut bool,
 ) -> bool {
     let parent = lp_arena.get(parent);
 
-    use FullAccessIR::*;
+    use IR::*;
     // During projection pushdown all accumulated.
     match parent {
         SimpleProjection { columns, .. } => {
             let iter = columns.iter_names().map(|s| ColumnName::from(s.as_str()));
             names_scratch.extend(iter);
+            *found_required_columns = true;
             false
         },
-        Filter { .. } => true,
+        Filter { predicate, .. } => {
+            // Also add predicate, as the projection is above the filter node.
+            names_scratch.extend(aexpr_to_leaf_names(predicate.node(), expr_arena));
+
+            true
+        },
         // Only filter and projection nodes are allowed, any other node we stop.
         _ => false,
     }
@@ -25,13 +33,13 @@ fn get_upper_projections(
 
 fn get_upper_predicates(
     parent: Node,
-    lp_arena: &Arena<FullAccessIR>,
+    lp_arena: &Arena<IR>,
     expr_arena: &mut Arena<AExpr>,
     predicate_scratch: &mut Vec<Expr>,
 ) -> bool {
     let parent = lp_arena.get(parent);
 
-    use FullAccessIR::*;
+    use IR::*;
     match parent {
         Filter { predicate, .. } => {
             let expr = predicate.to_expr(expr_arena);
@@ -47,11 +55,10 @@ fn get_upper_predicates(
 type TwoParents = [Option<Node>; 2];
 
 /// 1. This will ensure that all equal caches communicate the amount of columns
-/// they need to project.
-/// 2.
-/// - This will ensure we apply predicate in the subtrees below the caches.
-/// - If the predicate above the cache is the same for all matching caches that filter will be applied
-///  as well.
+///    they need to project.
+/// 2. This will ensure we apply predicate in the subtrees below the caches.
+///    If the predicate above the cache is the same for all matching caches, that filter will be
+///    applied as well.
 ///
 /// # Example
 /// Consider this tree, where `SUB-TREE` is duplicate and can be cached.
@@ -65,7 +72,7 @@ type TwoParents = [Option<Node>; 2];
 ///    SUB-TREE                                 SUB-TREE
 ///
 /// STEPS:
-/// - 1 CSE will run and will insert cache nodes
+/// - 1. CSE will run and will insert cache nodes
 ///
 ///                         Tree
 ///                         |
@@ -76,7 +83,7 @@ type TwoParents = [Option<Node>; 2];
 ///    |                                        |
 ///    SUB-TREE                                 SUB-TREE
 ///
-/// - 2 predicate and projection pushdown will run and will insert optional FILTER and PROJECTION above the caches
+/// - 2. predicate and projection pushdown will run and will insert optional FILTER and PROJECTION above the caches
 ///
 ///                         Tree
 ///                         |
@@ -111,7 +118,7 @@ type TwoParents = [Option<Node>; 2];
 /// - The predicates above the cache nodes are all different -> remove the cache nodes -> finish
 pub(super) fn set_cache_states(
     root: Node,
-    lp_arena: &mut Arena<FullAccessIR>,
+    lp_arena: &mut Arena<IR>,
     expr_arena: &mut Arena<AExpr>,
     scratch: &mut Vec<Node>,
     hive_partition_eval: HiveEval<'_>,
@@ -159,7 +166,7 @@ pub(super) fn set_cache_states(
         let lp = lp_arena.get(frame.current);
         lp.copy_inputs(scratch);
 
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
             // don't allow parallelism as caches need each others work
             // also self-referencing plans can deadlock on the files they lock
@@ -195,13 +202,17 @@ pub(super) fn set_cache_states(
                     v.parents.push(frame.parent);
                     v.cache_nodes.push(frame.current);
 
-                    let mut found_columns = false;
+                    let mut found_required_columns = false;
 
                     for parent_node in frame.parent.into_iter().flatten() {
-                        let keep_going =
-                            get_upper_projections(parent_node, lp_arena, &mut names_scratch);
+                        let keep_going = get_upper_projections(
+                            parent_node,
+                            lp_arena,
+                            expr_arena,
+                            &mut names_scratch,
+                            &mut found_required_columns,
+                        );
                         if !names_scratch.is_empty() {
-                            found_columns = true;
                             v.names_union.extend(names_scratch.drain(..));
                         }
                         // We stop early as we want to find the first projection node above the cache.
@@ -231,7 +242,7 @@ pub(super) fn set_cache_states(
 
                     // There was no explicit projection and we must take
                     // all columns
-                    if !found_columns {
+                    if !found_required_columns {
                         let schema = lp.schema(lp_arena);
                         v.names_union.extend(
                             schema
@@ -285,7 +296,7 @@ pub(super) fn set_cache_states(
                     for p_node in parents.into_iter().flatten() {
                         if matches!(
                             lp_arena.get(p_node),
-                            FullAccessIR::Filter { .. } | FullAccessIR::SimpleProjection { .. }
+                            IR::Filter { .. } | IR::SimpleProjection { .. }
                         ) {
                             node = p_node
                         } else {
@@ -319,20 +330,19 @@ pub(super) fn set_cache_states(
 
                     let new_child = lp_arena.add(child_lp);
 
-                    let lp = FullAccessIRBuilder::new(new_child, expr_arena, lp_arena)
+                    let lp = IRBuilder::new(new_child, expr_arena, lp_arena)
                         .project_simple(projection.iter().copied())
                         .unwrap()
                         .build();
 
                     let lp = proj_pd.optimize(lp, lp_arena, expr_arena)?;
                     // Remove the projection added by the optimization.
-                    let lp = if let FullAccessIR::Select { input, .. }
-                    | FullAccessIR::SimpleProjection { input, .. } = lp
-                    {
-                        lp_arena.take(input)
-                    } else {
-                        lp
-                    };
+                    let lp =
+                        if let IR::Select { input, .. } | IR::SimpleProjection { input, .. } = lp {
+                            lp_arena.take(input)
+                        } else {
+                            lp
+                        };
                     lp_arena.replace(child, lp);
                 }
             } else {
@@ -372,9 +382,9 @@ pub(super) fn set_cache_states(
     Ok(())
 }
 
-fn get_filter_node(parents: TwoParents, lp_arena: &Arena<FullAccessIR>) -> Option<Node> {
+fn get_filter_node(parents: TwoParents, lp_arena: &Arena<IR>) -> Option<Node> {
     parents
         .into_iter()
         .flatten()
-        .find(|&parent| matches!(lp_arena.get(parent), FullAccessIR::Filter { .. }))
+        .find(|&parent| matches!(lp_arena.get(parent), IR::Filter { .. }))
 }

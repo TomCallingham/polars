@@ -1,7 +1,13 @@
 use std::hash::{Hash, Hasher};
 
+#[cfg(feature = "csv")]
+use polars_io::csv::read::CsvReadOptions;
+#[cfg(feature = "ipc")]
+use polars_io::ipc::IpcScanOptions;
 #[cfg(feature = "parquet")]
-use polars_parquet::write::FileMetaData;
+use polars_io::parquet::metadata::FileMetaDataRef;
+#[cfg(feature = "parquet")]
+use polars_io::parquet::read::ParquetOptions;
 
 use super::*;
 
@@ -9,13 +15,16 @@ use super::*;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum FileScan {
     #[cfg(feature = "csv")]
-    Csv { options: CsvParserOptions },
+    Csv {
+        options: CsvReadOptions,
+        cloud_options: Option<polars_io::cloud::CloudOptions>,
+    },
     #[cfg(feature = "parquet")]
     Parquet {
         options: ParquetOptions,
         cloud_options: Option<polars_io::cloud::CloudOptions>,
         #[cfg_attr(feature = "serde", serde(skip))]
-        metadata: Option<Arc<FileMetaData>>,
+        metadata: Option<FileMetaDataRef>,
     },
     #[cfg(feature = "hdf5")]
     Hdf5 {
@@ -43,7 +52,16 @@ impl PartialEq for FileScan {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             #[cfg(feature = "csv")]
-            (FileScan::Csv { options: l }, FileScan::Csv { options: r }) => l == r,
+            (
+                FileScan::Csv {
+                    options: l,
+                    cloud_options: c_l,
+                },
+                FileScan::Csv {
+                    options: r,
+                    cloud_options: c_r,
+                },
+            ) => l == r && c_l == c_r,
             #[cfg(feature = "hdf5")]
             (FileScan::Hdf5 { options: l }, FileScan::Hdf5 { options: r }) => l == r,
             #[cfg(feature = "parquet")]
@@ -84,7 +102,14 @@ impl Hash for FileScan {
         std::mem::discriminant(self).hash(state);
         match self {
             #[cfg(feature = "csv")]
-            FileScan::Csv { options } => options.hash(state),
+            // FileScan::Csv { options } => options.hash(state),
+            FileScan::Csv {
+                options,
+                cloud_options,
+            } => {
+                options.hash(state);
+                cloud_options.hash(state);
+            },
             #[cfg(feature = "hdf5")]
             FileScan::Hdf5 { options } => options.hash(state),
             #[cfg(feature = "parquet")]
@@ -94,7 +119,7 @@ impl Hash for FileScan {
                 metadata: _,
             } => {
                 options.hash(state);
-                cloud_options.hash(state)
+                cloud_options.hash(state);
             },
             #[cfg(feature = "ipc")]
             FileScan::Ipc {

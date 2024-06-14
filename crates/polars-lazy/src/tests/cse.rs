@@ -1,20 +1,24 @@
 use std::collections::BTreeSet;
 
+use polars_ops::prelude::JoinCoalesce;
+
 use super::*;
 
 fn cached_before_root(q: LazyFrame) {
     let (mut expr_arena, mut lp_arena) = get_arenas();
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
-    for input in lp_arena.get(lp).get_inputs() {
-        assert!(matches!(lp_arena.get(input), FullAccessIR::Cache { .. }));
+    for input in lp_arena.get(lp).get_inputs_vec() {
+        assert!(matches!(lp_arena.get(input), IR::Cache { .. }));
     }
 }
 
 fn count_caches(q: LazyFrame) -> usize {
-    let (node, lp_arena, _) = q.to_alp_optimized().unwrap();
+    let IRPlan {
+        lp_top, lp_arena, ..
+    } = q.to_alp_optimized().unwrap();
     (&lp_arena)
-        .iter(node)
-        .filter(|(_node, lp)| matches!(lp, FullAccessIR::Cache { .. }))
+        .iter(lp_top)
+        .filter(|(_node, lp)| matches!(lp, IR::Cache { .. }))
         .count()
 }
 
@@ -55,7 +59,7 @@ fn test_cse_unions() -> PolarsResult<()> {
     let lp = lf.clone().optimize(&mut lp_arena, &mut expr_arena).unwrap();
     let mut cache_count = 0;
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
             Cache { .. } => {
                 cache_count += 1;
@@ -98,14 +102,14 @@ fn test_cse_cache_union_projection_pd() -> PolarsResult<()> {
     let lp = q.optimize(&mut lp_arena, &mut expr_arena).unwrap();
     let mut cache_count = 0;
     assert!((&lp_arena).iter(lp).all(|(_, lp)| {
-        use FullAccessIR::*;
+        use IR::*;
         match lp {
             Cache { .. } => {
                 cache_count += 1;
                 true
             },
             DataFrameScan {
-                projection: Some(projection),
+                output_schema: Some(projection),
                 ..
             } => projection.as_ref().len() <= 2,
             DataFrameScan { .. } => false,
@@ -154,7 +158,7 @@ fn test_cse_union2_4925() -> PolarsResult<()> {
     let cache_ids = (&lp_arena)
         .iter(lp)
         .flat_map(|(_, lp)| {
-            use FullAccessIR::*;
+            use IR::*;
             match lp {
                 Cache { id, cache_hits, .. } => {
                     assert_eq!(*cache_hits, 1);
@@ -196,7 +200,11 @@ fn test_cse_joins_4954() -> PolarsResult<()> {
         b,
         &[col("a"), col("b")],
         &[col("a"), col("b")],
-        JoinType::Left.into(),
+        JoinArgs {
+            how: JoinType::Left,
+            coalesce: JoinCoalesce::CoalesceColumns,
+            ..Default::default()
+        },
     );
 
     let (mut expr_arena, mut lp_arena) = get_arenas();
@@ -207,7 +215,7 @@ fn test_cse_joins_4954() -> PolarsResult<()> {
     let cache_ids = (&lp_arena)
         .iter(lp)
         .flat_map(|(_, lp)| {
-            use FullAccessIR::*;
+            use IR::*;
             match lp {
                 Cache {
                     id,
@@ -216,10 +224,7 @@ fn test_cse_joins_4954() -> PolarsResult<()> {
                     ..
                 } => {
                     assert_eq!(*cache_hits, 1);
-                    assert!(matches!(
-                        lp_arena.get(*input),
-                        FullAccessIR::DataFrameScan { .. }
-                    ));
+                    assert!(matches!(lp_arena.get(*input), IR::DataFrameScan { .. }));
 
                     Some(*id)
                 },
@@ -279,7 +284,7 @@ fn test_cache_with_partial_projection() -> PolarsResult<()> {
     let cache_ids = (&lp_arena)
         .iter(lp)
         .flat_map(|(_, lp)| {
-            use FullAccessIR::*;
+            use IR::*;
             match lp {
                 Cache { id, .. } => Some(*id),
                 _ => None,
@@ -306,12 +311,16 @@ fn test_cse_columns_projections() -> PolarsResult<()> {
     ]?
     .lazy();
 
-    let left = left.cross_join(right.clone().select([col("A")]));
+    let left = left.cross_join(right.clone().select([col("A")]), None);
     let q = left.join(
         right.rename(["B"], ["C"]),
         [col("A"), col("C")],
         [col("A"), col("C")],
-        JoinType::Left.into(),
+        JoinArgs {
+            how: JoinType::Left,
+            coalesce: JoinCoalesce::CoalesceColumns,
+            ..Default::default()
+        },
     );
 
     let out = q.collect()?;

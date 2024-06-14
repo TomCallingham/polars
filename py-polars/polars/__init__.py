@@ -13,7 +13,12 @@ with contextlib.suppress(ImportError):  # Module not available when building doc
     # we also set other function pointers needed
     # on the rust side. This function is highly
     # unsafe and should only be called once.
-    from polars.polars import __register_startup_deps
+    from polars.polars import (
+        __register_startup_deps,
+    )
+    from polars.polars import (
+        get_file_cache_prefix as _get_file_cache_prefix,
+    )
 
     __register_startup_deps()
 
@@ -73,7 +78,6 @@ from polars.datatypes import (
     Utf8,
 )
 from polars.exceptions import (
-    ArrowError,
     CategoricalRemappingWarning,
     ChronoFormatWarning,
     ColumnNotFoundError,
@@ -89,6 +93,8 @@ from polars.exceptions import (
     SchemaError,
     SchemaFieldNotFoundError,
     ShapeError,
+    SQLInterfaceError,
+    SQLSyntaxError,
     StructFieldNotFoundError,
     UnstableWarning,
 )
@@ -99,7 +105,6 @@ from polars.functions import (
     all_horizontal,
     any,
     any_horizontal,
-    apply,
     approx_n_unique,
     arange,
     arctan2,
@@ -122,10 +127,6 @@ from polars.functions import (
     cum_reduce,
     cum_sum,
     cum_sum_horizontal,
-    cumfold,
-    cumreduce,
-    cumsum,
-    cumsum_horizontal,
     date,
     date_range,
     date_ranges,
@@ -135,6 +136,7 @@ from polars.functions import (
     duration,
     element,
     exclude,
+    field,
     first,
     fold,
     format,
@@ -147,7 +149,6 @@ from polars.functions import (
     last,
     len,
     lit,
-    map,
     map_batches,
     map_groups,
     max,
@@ -158,6 +159,7 @@ from polars.functions import (
     min,
     min_horizontal,
     n_unique,
+    nth,
     ones,
     quantile,
     reduce,
@@ -212,8 +214,9 @@ from polars.meta import (
     thread_pool_size,
     threadpool_size,
 )
+from polars.schema import Schema
 from polars.series import Series
-from polars.sql import SQLContext
+from polars.sql import SQLContext, sql
 from polars.string_cache import (
     StringCache,
     disable_string_cache,
@@ -230,7 +233,6 @@ __all__ = [
     "exceptions",
     "plugins",
     # exceptions/errors
-    "ArrowError",
     "ColumnNotFoundError",
     "ComputeError",
     "DuplicateError",
@@ -239,22 +241,26 @@ __all__ = [
     "OutOfBoundsError",
     "PolarsError",
     "PolarsPanicError",
+    "SQLInterfaceError",
+    "SQLSyntaxError",
     "SchemaError",
     "SchemaFieldNotFoundError",
     "ShapeError",
     "StructFieldNotFoundError",
     # warnings
-    "PolarsWarning",
     "CategoricalRemappingWarning",
     "ChronoFormatWarning",
     "MapWithoutReturnDtypeWarning",
+    "PolarsWarning",
     "UnstableWarning",
     # core classes
     "DataFrame",
     "Expr",
     "LazyFrame",
     "Series",
+    # other classes
     "InProcessQuery",
+    "Schema",
     # polars.datatypes
     "Array",
     "Binary",
@@ -269,20 +275,20 @@ __all__ = [
     "Field",
     "Float32",
     "Float64",
+    "Int8",
     "Int16",
     "Int32",
     "Int64",
-    "Int8",
     "List",
     "Null",
     "Object",
     "String",
     "Struct",
     "Time",
+    "UInt8",
     "UInt16",
     "UInt32",
     "UInt64",
-    "UInt8",
     "Unknown",
     "Utf8",
     # polars.datatypes: dtype groups
@@ -297,6 +303,7 @@ __all__ = [
     "PolarsDataType",
     # polars.io
     "read_avro",
+    "read_clipboard",
     "read_csv",
     "read_csv_batched",
     "read_database",
@@ -318,7 +325,6 @@ __all__ = [
     "scan_ndjson",
     "scan_parquet",
     "scan_pyarrow_dataset",
-    "read_clipboard",
     # polars.stringcache
     "StringCache",
     "disable_string_cache",
@@ -345,22 +351,19 @@ __all__ = [
     "zeros",
     # polars.functions.aggregation
     "all",
-    "any",
-    "cum_sum",
-    "cumsum",
-    "max",
-    "min",
-    "sum",
     "all_horizontal",
+    "any",
     "any_horizontal",
+    "cum_sum",
     "cum_sum_horizontal",
-    "cumsum_horizontal",
+    "max",
     "max_horizontal",
     "mean_horizontal",
+    "min",
     "min_horizontal",
+    "sum",
     "sum_horizontal",
     # polars.functions.lazy
-    "apply",
     "approx_n_unique",
     "arange",
     "arctan2",
@@ -384,6 +387,7 @@ __all__ = [
     "datetime",  # named datetime_, see import above
     "duration",
     "exclude",
+    "field",
     "first",
     "fold",
     "format",
@@ -395,12 +399,12 @@ __all__ = [
     "int_ranges",
     "last",
     "lit",
-    "map",
     "map_batches",
     "map_groups",
     "mean",
     "median",
     "n_unique",
+    "nth",
     "quantile",
     "reduce",
     "rolling_corr",
@@ -426,6 +430,7 @@ __all__ = [
     "from_repr",
     # polars.sql
     "SQLContext",
+    "sql",
     # polars.utils
     "build_info",
     "get_index_type",
@@ -435,6 +440,8 @@ __all__ = [
     # selectors
     "selectors",
     "sql_expr",
+    # internal
+    "_get_file_cache_prefix",
 ]
 
 os.environ["POLARS_ALLOW_EXTENSION"] = "true"

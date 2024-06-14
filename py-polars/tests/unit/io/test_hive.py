@@ -33,12 +33,12 @@ def test_hive_partitioned_predicate_pushdown(
     )
     q = pl.scan_parquet(root / "**/*.parquet", hive_partitioning=False)
     # checks schema
-    assert q.columns == ["calories", "sugars_g"]
+    assert q.collect_schema().names() == ["calories", "sugars_g"]
     # checks materialization
     assert q.collect().columns == ["calories", "sugars_g"]
 
     q = pl.scan_parquet(root / "**/*.parquet", hive_partitioning=True)
-    assert q.columns == ["calories", "sugars_g", "category", "fats_g"]
+    assert q.collect_schema().names() == ["calories", "sugars_g", "category", "fats_g"]
 
     # Partitioning changes the order
     sort_by = ["fats_g", "category", "calories", "sugars_g"]
@@ -91,9 +91,14 @@ def test_hive_partitioned_predicate_pushdown_skips_correct_number_of_files(
 
     # Ensure the CSE can work with hive partitions.
     q = q.filter(pl.col("a").gt(2))
-    assert q.join(q, on="a", how="left").collect(comm_subplan_elim=True).to_dict(
-        as_series=False
-    ) == {"d": [3, 4], "a": [3, 4], "d_right": [3, 4]}
+    result = q.join(q, on="a", how="left").collect(comm_subplan_elim=True)
+    expected = {
+        "a": [3, 4],
+        "d": [3, 4],
+        "a_right": [3, 4],
+        "d_right": [3, 4],
+    }
+    assert result.to_dict(as_series=False) == expected
 
 
 @pytest.mark.skip(
@@ -182,7 +187,7 @@ def test_hive_partitioned_err(io_files_path: Path, tmp_path: Path) -> None:
     df.write_parquet(root / "file.parquet")
 
     with pytest.raises(pl.DuplicateError, match="invalid Hive partition schema"):
-        pl.scan_parquet(root / "**/*.parquet", hive_partitioning=True)
+        pl.scan_parquet(root / "**/*.parquet", hive_partitioning=True).collect()
 
 
 @pytest.mark.write_disk()
@@ -234,7 +239,9 @@ def dataset_path(tmp_path: Path) -> Path:
 @pytest.mark.write_disk()
 def test_scan_parquet_hive_schema(dataset_path: Path) -> None:
     result = pl.scan_parquet(dataset_path / "**/*.parquet", hive_partitioning=True)
-    assert result.schema == OrderedDict({"a": pl.Int64, "b": pl.Float64, "c": pl.Int64})
+    assert result.collect_schema() == OrderedDict(
+        {"a": pl.Int64, "b": pl.Float64, "c": pl.Int64}
+    )
 
     result = pl.scan_parquet(
         dataset_path / "**/*.parquet",
@@ -243,7 +250,7 @@ def test_scan_parquet_hive_schema(dataset_path: Path) -> None:
     )
 
     expected_schema = OrderedDict({"a": pl.Int64, "b": pl.Float64, "c": pl.Int32})
-    assert result.schema == expected_schema
+    assert result.collect_schema() == expected_schema
     assert result.collect().schema == expected_schema
 
 

@@ -64,11 +64,8 @@ impl PushNode for UnitVec<Node> {
     }
 }
 
-pub(crate) fn is_scan(plan: &FullAccessIR) -> bool {
-    matches!(
-        plan,
-        FullAccessIR::Scan { .. } | FullAccessIR::DataFrameScan { .. }
-    )
+pub(crate) fn is_scan(plan: &IR) -> bool {
+    matches!(plan, IR::Scan { .. } | IR::DataFrameScan { .. })
 }
 
 /// A projection that only takes a column or a column + alias.
@@ -109,7 +106,7 @@ pub fn has_aexpr_literal(current_node: Node, arena: &Arena<AExpr>) -> bool {
 
 /// Can check if an expression tree has a matching_expr. This
 /// requires a dummy expression to be created that will be used to pattern match against.
-pub(crate) fn has_expr<F>(current_expr: &Expr, matches: F) -> bool
+pub fn has_expr<F>(current_expr: &Expr, matches: F) -> bool
 where
     F: Fn(&Expr) -> bool,
 {
@@ -182,7 +179,7 @@ pub fn expr_output_name(expr: &Expr) -> PolarsResult<Arc<str>> {
                 ComputeError:
                 "cannot determine output column without a context for this expression"
             ),
-            Expr::Columns(_) | Expr::DtypeColumn(_) => polars_bail!(
+            Expr::Columns(_) | Expr::DtypeColumn(_) | Expr::IndexColumn(_) => polars_bail!(
                 ComputeError:
                 "this expression may produce multiple output names"
             ),

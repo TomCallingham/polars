@@ -1,9 +1,17 @@
+import io
 from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
+import pytest
 
 import polars as pl
+
+
+def test_series_init_instantiated_object() -> None:
+    s = pl.Series([object(), object()], dtype=pl.Object())
+    assert isinstance(s, pl.Series)
+    assert isinstance(s.dtype, pl.Object)
 
 
 def test_object_empty_filter_5911() -> None:
@@ -135,6 +143,8 @@ def test_object_apply_to_struct() -> None:
 
 
 def test_null_obj_str_13512() -> None:
+    # https://github.com/pola-rs/polars/issues/13512
+
     df1 = pl.DataFrame(
         {
             "key": [1],
@@ -142,7 +152,7 @@ def test_null_obj_str_13512() -> None:
     )
     df2 = pl.DataFrame({"key": [2], "a": pl.Series([1], dtype=pl.Object)})
 
-    out = df1.join(df2, on="key", how="left")
+    out = df1.join(df2, on="key", how="left", coalesce=True)
     s = str(out)
     assert s == (
         "shape: (1, 2)\n"
@@ -160,3 +170,26 @@ def test_format_object_series_14267() -> None:
     s = pl.Series([Path(), Path("abc")])
     expected = "shape: (2,)\n" "Series: '' [o][object]\n" "[\n" "\t.\n" "\tabc\n" "]"
     assert str(s) == expected
+
+
+def test_object_raise_writers() -> None:
+    df = pl.DataFrame({"a": object()})
+
+    buf = io.BytesIO()
+
+    with pytest.raises(pl.ComputeError):
+        df.write_parquet(buf)
+    with pytest.raises(pl.ComputeError):
+        df.write_ipc(buf)
+    with pytest.raises(pl.ComputeError):
+        df.write_json(buf)
+    with pytest.raises(pl.ComputeError):
+        df.write_csv(buf)
+    with pytest.raises(pl.ComputeError):
+        df.write_avro(buf)
+
+
+def test_raise_list_object() -> None:
+    # We don't want to support this. Unsafe enough as it is already.
+    with pytest.raises(ValueError):
+        pl.Series([[object()]], dtype=pl.List(pl.Object()))

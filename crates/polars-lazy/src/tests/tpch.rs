@@ -78,18 +78,20 @@ fn test_q2() -> PolarsResult<()> {
         ])])
         .sort_by_exprs(
             [cols(["s_acctbal", "n_name", "s_name", "p_partkey"])],
-            [true, false, false, false],
-            false,
-            false,
+            SortMultipleOptions::default()
+                .with_order_descending_multi([true, false, false, false])
+                .with_maintain_order(true),
         )
         .limit(100)
         .with_comm_subplan_elim(true);
 
-    let (node, lp_arena, _) = q.clone().to_alp_optimized().unwrap();
+    let IRPlan {
+        lp_top, lp_arena, ..
+    } = q.clone().to_alp_optimized().unwrap();
     assert_eq!(
         (&lp_arena)
-            .iter(node)
-            .filter(|(_, alp)| matches!(alp, FullAccessIR::Cache { .. }))
+            .iter(lp_top)
+            .filter(|(_, alp)| matches!(alp, IR::Cache { .. }))
             .count(),
         2
     );
