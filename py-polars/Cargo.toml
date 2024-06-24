@@ -168,7 +168,8 @@ operations = [
   "peaks",
   "hist",
   "find_many",
-]dtype-i8 = []
+]
+dtype-i8 = []
 nightly = ["polars/nightly"]
 streaming = ["polars/streaming"]
 meta = ["polars/meta"]
