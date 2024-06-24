@@ -16,12 +16,19 @@ import pytest
 import polars as pl
 import polars.selectors as cs
 from polars._utils.construction import iterable_to_pydf
-from polars.datatypes import DTYPE_TEMPORAL_UNITS, INTEGER_DTYPES
+from polars.datatypes import DTYPE_TEMPORAL_UNITS
+from polars.exceptions import (
+    ComputeError,
+    DuplicateError,
+    InvalidOperationError,
+    OutOfBoundsError,
+)
 from polars.testing import (
     assert_frame_equal,
     assert_frame_not_equal,
     assert_series_equal,
 )
+from tests.unit.conftest import INTEGER_DTYPES
 
 if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
@@ -76,7 +83,7 @@ def test_comparisons() -> None:
     assert_frame_equal(df >= 2, pl.DataFrame({"a": [False, True], "b": [True, True]}))
     assert_frame_equal(df <= 2, pl.DataFrame({"a": [True, True], "b": [False, False]}))
 
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         df > "2"  # noqa: B015
 
     # Series
@@ -115,7 +122,7 @@ def test_comparisons() -> None:
         df == pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})  # noqa: B015
 
     # Type mismatch
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         df == pl.DataFrame({"a": [1, 2], "b": ["x", "y"]})  # noqa: B015
 
 
@@ -385,7 +392,7 @@ def test_take_misc(fruits_cars: pl.DataFrame) -> None:
     df = fruits_cars
 
     # Out of bounds error.
-    with pytest.raises(pl.OutOfBoundsError):
+    with pytest.raises(OutOfBoundsError):
         df.sort("fruits").select(
             pl.col("B").reverse().gather([1, 2]).implode().over("fruits"),
             "fruits",
@@ -490,7 +497,7 @@ def test_file_buffer() -> None:
     f.write(b"1,2,3,4,5,6\n7,8,9,10,11,12")
     f.seek(0)
     # check if not fails on TryClone and Length impl in file.rs
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         pl.read_parquet(f)
 
 
@@ -998,6 +1005,7 @@ def test_literal_series() -> None:
                 (21.0, 2, "reg3", datetime(2022, 8, 18, 0), 3),
             ],
             schema=expected_schema,  # type: ignore[arg-type]
+            orient="row",
         ),
         out,
         atol=0.00001,
@@ -1107,7 +1115,7 @@ def test_from_generator_or_iterable() -> None:
 
 
 def test_from_rows() -> None:
-    df = pl.from_records([[1, 2, "foo"], [2, 3, "bar"]])
+    df = pl.from_records([[1, 2, "foo"], [2, 3, "bar"]], orient="row")
     assert_frame_equal(
         df,
         pl.DataFrame(
@@ -1123,7 +1131,7 @@ def test_from_rows() -> None:
 
     # auto-inference with same num rows/cols
     data = [(1, 2, "foo"), (2, 3, "bar"), (3, 4, "baz")]
-    df = pl.from_records(data)
+    df = pl.from_records(data, orient="row")
     assert data == df.rows()
 
 
@@ -1200,7 +1208,7 @@ def test_repeat_by_unequal_lengths_panic() -> None:
         }
     )
     with pytest.raises(
-        pl.ComputeError,
+        ComputeError,
         match="repeat_by argument and the Series should have equal length, "
         "or at least one of them should have length 1",
     ):
@@ -1357,12 +1365,12 @@ def test_dot_product() -> None:
     assert result == 32.0
 
     with pytest.raises(
-        pl.InvalidOperationError, match="`dot` operation not supported for dtype `bool`"
+        InvalidOperationError, match="`dot` operation not supported for dtype `bool`"
     ):
         pl.Series([True, False, False, True]) @ pl.Series([4, 5, 6, 7])
 
     with pytest.raises(
-        pl.InvalidOperationError, match="`dot` operation not supported for dtype `str`"
+        InvalidOperationError, match="`dot` operation not supported for dtype `str`"
     ):
         pl.Series([1, 2, 3, 4]) @ pl.Series(["True", "False", "False", "True"])
 
@@ -1714,10 +1722,10 @@ def test_schema_equality() -> None:
 
 def test_df_schema_unique() -> None:
     df = pl.DataFrame({"a": [1, 2], "b": [3, 4]})
-    with pytest.raises(pl.DuplicateError):
+    with pytest.raises(DuplicateError):
         df.columns = ["a", "a"]
 
-    with pytest.raises(pl.DuplicateError):
+    with pytest.raises(DuplicateError):
         df.rename({"b": "a"})
 
 
@@ -2107,7 +2115,7 @@ def test_lower_bound_upper_bound(fruits_cars: pl.DataFrame) -> None:
     res_expr = fruits_cars.select(pl.col("B").upper_bound())
     assert res_expr.item() == 9223372036854775807
 
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         fruits_cars.select(pl.col("fruits").upper_bound())
 
 

@@ -150,7 +150,7 @@ where
             })
             .collect::<PolarsResult<Vec<_>>>()?;
         let batches = df
-            .iter_chunks(true)
+            .iter_chunks(true, false)
             .map(|chunk| Ok(Box::new(chunk_to_struct(chunk, fields.clone())) as ArrayRef));
 
         match self.json_format {
@@ -194,7 +194,7 @@ where
                 Ok(s.field().to_arrow(true))
             })
             .collect::<PolarsResult<Vec<_>>>()?;
-        let chunks = df.iter_chunks(true);
+        let chunks = df.iter_chunks(true, false);
         let batches =
             chunks.map(|chunk| Ok(Box::new(chunk_to_struct(chunk, fields.clone())) as ArrayRef));
         let mut serializer = polars_json::ndjson::write::Serializer::new(batches, vec![]);
@@ -250,8 +250,8 @@ where
     /// Because JSON values specify their types (number, string, etc), no upcasting or conversion is performed between
     /// incompatible types in the input. In the event that a column contains mixed dtypes, is it unspecified whether an
     /// error is returned or whether elements of incompatible dtypes are replaced with `null`.
-    fn finish(self) -> PolarsResult<DataFrame> {
-        let rb: ReaderBytes = (&self.reader).into();
+    fn finish(mut self) -> PolarsResult<DataFrame> {
+        let rb: ReaderBytes = (&mut self.reader).into();
 
         let out = match self.json_format {
             JsonFormat::Json => {
@@ -327,6 +327,9 @@ where
                     false,
                     self.infer_schema_len,
                     self.ignore_errors,
+                    None,
+                    None,
+                    None,
                 )?;
                 let mut df: DataFrame = json_reader.as_df()?;
                 if self.rechunk {

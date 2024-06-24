@@ -274,6 +274,7 @@ timezones = [
   "polars-core/timezones",
   "polars-lazy?/timezones",
   "polars-io/timezones",
+  "polars-ops/timezones",
   "polars-sql?/timezones",
 ]
 to_dummies = ["polars-ops/to_dummies"]

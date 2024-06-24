@@ -53,7 +53,7 @@ class Then(Expr):
         self._then = then
 
     @classmethod
-    def _from_pyexpr(cls, pyexpr: PyExpr) -> Expr:  # type: ignore[override]
+    def _from_pyexpr(cls, pyexpr: PyExpr) -> Expr:
         return wrap_expr(pyexpr)
 
     @property
@@ -99,7 +99,7 @@ class Then(Expr):
         return wrap_expr(self._then.otherwise(statement_pyexpr))
 
 
-class ChainedWhen(Expr):
+class ChainedWhen:
     """
     Utility class for the `when-then-otherwise` expression.
 
@@ -137,7 +137,7 @@ class ChainedThen(Expr):
         self._chained_then = chained_then
 
     @classmethod
-    def _from_pyexpr(cls, pyexpr: PyExpr) -> Expr:  # type: ignore[override]
+    def _from_pyexpr(cls, pyexpr: PyExpr) -> Expr:
         return wrap_expr(pyexpr)
 
     @property

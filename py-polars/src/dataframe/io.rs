@@ -190,10 +190,10 @@ impl PyDataFrame {
     pub fn deserialize(py: Python, mut py_f: Bound<PyAny>) -> PyResult<Self> {
         use crate::file::read_if_bytesio;
         py_f = read_if_bytesio(py_f);
-        let mmap_bytes_r = get_mmap_bytes_reader(&py_f)?;
+        let mut mmap_bytes_r = get_mmap_bytes_reader(&py_f)?;
 
         py.allow_threads(move || {
-            let mmap_read: ReaderBytes = (&mmap_bytes_r).into();
+            let mmap_read: ReaderBytes = (&mut mmap_bytes_r).into();
             let bytes = mmap_read.deref();
             match serde_json::from_slice::<DataFrame>(bytes) {
                 Ok(df) => Ok(df.into()),
@@ -370,6 +370,7 @@ impl PyDataFrame {
         datetime_format: Option<String>,
         date_format: Option<String>,
         time_format: Option<String>,
+        float_scientific: Option<bool>,
         float_precision: Option<usize>,
         null_value: Option<String>,
         quote_style: Option<Wrap<QuoteStyle>>,
@@ -390,6 +391,7 @@ impl PyDataFrame {
                     .with_datetime_format(datetime_format)
                     .with_date_format(date_format)
                     .with_time_format(time_format)
+                    .with_float_scientific(float_scientific)
                     .with_float_precision(float_precision)
                     .with_null_value(null)
                     .with_quote_style(quote_style.map(|wrap| wrap.0).unwrap_or_default())
@@ -408,6 +410,7 @@ impl PyDataFrame {
                 .with_datetime_format(datetime_format)
                 .with_date_format(date_format)
                 .with_time_format(time_format)
+                .with_float_scientific(float_scientific)
                 .with_float_precision(float_precision)
                 .with_null_value(null)
                 .with_quote_style(quote_style.map(|wrap| wrap.0).unwrap_or_default())
@@ -525,12 +528,14 @@ impl PyDataFrame {
         py: Python,
         py_f: PyObject,
         compression: Wrap<Option<IpcCompression>>,
+        future: bool,
     ) -> PyResult<()> {
         if let Ok(s) = py_f.extract::<PyBackedStr>(py) {
             let f = std::fs::File::create(&*s)?;
             py.allow_threads(|| {
                 IpcStreamWriter::new(f)
                     .with_compression(compression.0)
+                    .with_pl_flavor(future)
                     .finish(&mut self.df)
                     .map_err(PyPolarsErr::from)
             })?;
@@ -539,6 +544,7 @@ impl PyDataFrame {
 
             IpcStreamWriter::new(&mut buf)
                 .with_compression(compression.0)
+                .with_pl_flavor(future)
                 .finish(&mut self.df)
                 .map_err(PyPolarsErr::from)?;
         }

@@ -22,7 +22,7 @@ def permutations_int_dec_none() -> list[tuple[D | int | None, ...]]:
                 D("-0.01"),
                 D("1.2345678"),
                 D("500"),
-                # -1,  # TODO: Address in https://github.com/pola-rs/polars/issues/14427
+                -1,
                 None,
             ]
         )
@@ -128,7 +128,9 @@ def test_decimal_convert_to_float_by_schema() -> None:
 
 
 def test_df_constructor_convert_decimal_to_float_9873() -> None:
-    result = pl.DataFrame([[D("45.0000")], [D("45.0000")]], schema={"a": pl.Float64})
+    result = pl.DataFrame(
+        [[D("45.0000")], [D("45.0000")]], schema={"a": pl.Float64}, orient="row"
+    )
     expected = pl.DataFrame({"a": [45.0, 45.0]})
     assert_frame_equal(result, expected)
 

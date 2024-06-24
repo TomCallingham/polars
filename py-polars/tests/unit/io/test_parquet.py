@@ -17,6 +17,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 
 import polars as pl
+from polars.exceptions import ComputeError
 from polars.testing import assert_frame_equal, assert_series_equal
 from polars.testing.parametric import dataframes
 
@@ -123,11 +124,11 @@ def test_read_parquet_respects_rechunk_16416(
 def test_to_from_buffer_lzo(df: pl.DataFrame) -> None:
     buf = io.BytesIO()
     # Writing lzo compressed parquet files is not supported for now.
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         df.write_parquet(buf, compression="lzo", use_pyarrow=False)
     buf.seek(0)
     # Invalid parquet file as writing failed.
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         _ = pl.read_parquet(buf)
 
     buf = io.BytesIO()
@@ -136,7 +137,7 @@ def test_to_from_buffer_lzo(df: pl.DataFrame) -> None:
         df.write_parquet(buf, compression="lzo", use_pyarrow=True)
     buf.seek(0)
     # Invalid parquet file as writing failed.
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         _ = pl.read_parquet(buf)
 
 
@@ -160,10 +161,10 @@ def test_to_from_file_lzo(df: pl.DataFrame, tmp_path: Path) -> None:
     file_path = tmp_path / "small.avro"
 
     # Writing lzo compressed parquet files is not supported for now.
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         df.write_parquet(file_path, compression="lzo", use_pyarrow=False)
     # Invalid parquet file as writing failed.
-    with pytest.raises(pl.ComputeError):
+    with pytest.raises(ComputeError):
         _ = pl.read_parquet(file_path)
 
     # Writing lzo compressed parquet files is not supported for now.
@@ -908,40 +909,13 @@ def test_complex_types(tmp_path: Path, series: list[Any], dtype: pl.DataType) ->
     xs = pl.Series(series, dtype=dtype)
     df = pl.DataFrame({"x": xs})
 
-    tmp_path.mkdir(exist_ok=True)
-    file_path = tmp_path / "complex-types.parquet"
-
-    df.write_parquet(file_path)
-    after = pl.read_parquet(file_path)
-
-    assert str(after) == str(df)
+    test_round_trip(df)
 
 
 @pytest.mark.xfail()
 def test_placeholder_zero_array() -> None:
     # @TODO: if this does not fail anymore please enable the upper test-cases
     pl.Series([[]], dtype=pl.Array(pl.Int8, 0))
-
-
-@pytest.mark.xfail()
-def test_placeholder_no_array_equals() -> None:
-    # @TODO: if this does not fail anymore please just call
-    # `test_round_trip` instead of comparing the strings.
-    test_round_trip(
-        pl.DataFrame(
-            {
-                "x": pl.Series(
-                    [
-                        [
-                            [1, 2],
-                            [3, 4],
-                        ]
-                    ],
-                    dtype=pl.Array(pl.List(pl.Int8), 2),
-                )
-            }
-        )
-    )
 
 
 @pytest.mark.write_disk()
@@ -1141,3 +1115,98 @@ def test_parquet_statistics_uint64_16683() -> None:
 
     assert statistics.min == 0
     assert statistics.max == u64_max
+
+
+@pytest.mark.slow()
+@pytest.mark.parametrize("nullable", [True, False])
+def test_read_byte_stream_split(nullable: bool) -> None:
+    rng = np.random.default_rng(123)
+    num_rows = 1_000
+    values = rng.uniform(-1.0e6, 1.0e6, num_rows)
+    if nullable:
+        validity_mask = rng.integers(0, 2, num_rows).astype(np.bool_)
+    else:
+        validity_mask = None
+
+    schema = pa.schema(
+        [
+            pa.field("floats", type=pa.float32(), nullable=nullable),
+            pa.field("doubles", type=pa.float64(), nullable=nullable),
+        ]
+    )
+    arrays = [pa.array(values, type=field.type, mask=validity_mask) for field in schema]
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    df = cast(pl.DataFrame, pl.from_arrow(table))
+
+    f = io.BytesIO()
+    pq.write_table(
+        table, f, compression="snappy", use_dictionary=False, use_byte_stream_split=True
+    )
+
+    f.seek(0)
+    read = pl.read_parquet(f)
+
+    assert_frame_equal(read, df)
+
+
+@pytest.mark.slow()
+@pytest.mark.parametrize("rows_nullable", [True, False])
+@pytest.mark.parametrize("item_nullable", [True, False])
+def test_read_byte_stream_split_arrays(
+    item_nullable: bool, rows_nullable: bool
+) -> None:
+    rng = np.random.default_rng(123)
+    num_rows = 1_000
+    max_array_len = 10
+    array_lengths = rng.integers(0, max_array_len + 1, num_rows)
+    if rows_nullable:
+        row_validity_mask = rng.integers(0, 2, num_rows).astype(np.bool_)
+        array_lengths[row_validity_mask] = 0
+        row_validity_mask = pa.array(row_validity_mask)
+    else:
+        row_validity_mask = None
+
+    offsets = np.zeros(num_rows + 1, dtype=np.int64)
+    np.cumsum(array_lengths, out=offsets[1:])
+    num_values = offsets[-1]
+    values = rng.uniform(-1.0e6, 1.0e6, num_values)
+
+    if item_nullable:
+        element_validity_mask = rng.integers(0, 2, num_values).astype(np.bool_)
+    else:
+        element_validity_mask = None
+
+    schema = pa.schema(
+        [
+            pa.field(
+                "floats",
+                type=pa.list_(pa.field("", pa.float32(), nullable=item_nullable)),
+                nullable=rows_nullable,
+            ),
+            pa.field(
+                "doubles",
+                type=pa.list_(pa.field("", pa.float64(), nullable=item_nullable)),
+                nullable=rows_nullable,
+            ),
+        ]
+    )
+    arrays = [
+        pa.ListArray.from_arrays(
+            pa.array(offsets),
+            pa.array(values, type=field.type.field(0).type, mask=element_validity_mask),
+            mask=row_validity_mask,
+        )
+        for field in schema
+    ]
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    df = cast(pl.DataFrame, pl.from_arrow(table))
+
+    f = io.BytesIO()
+    pq.write_table(
+        table, f, compression="snappy", use_dictionary=False, use_byte_stream_split=True
+    )
+
+    f.seek(0)
+    read = pl.read_parquet(f)
+
+    assert_frame_equal(read, df)

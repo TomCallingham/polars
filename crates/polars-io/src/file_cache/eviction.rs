@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
-use polars_core::config;
 use polars_error::{PolarsError, PolarsResult};
 
 use super::cache_lock::{GlobalFileCacheGuardExclusive, GLOBAL_FILE_CACHE_LOCK};
@@ -154,7 +153,7 @@ impl EvictionManager {
     /// * `self.data_dir`
     /// * `self.metadata_dir`
     pub(super) fn run_in_background(mut self) {
-        let verbose = config::verbose();
+        let verbose = false;
 
         if verbose {
             eprintln!(
@@ -322,7 +321,7 @@ impl EvictionManager {
     /// # Panics
     /// Panics if `self.files_to_remove` is `None`.
     fn evict_files(&mut self, _guard: &GlobalFileCacheGuardExclusive) {
-        let verbose = config::verbose();
+        let verbose = false;
         let mut files_to_remove = self.files_to_remove.take().unwrap();
         let now = &SystemTime::now();
 
