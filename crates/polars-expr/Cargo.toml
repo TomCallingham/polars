@@ -27,6 +27,7 @@ smartstring = { workspace = true }
 nightly = ["polars-core/nightly", "polars-plan/nightly"]
 streaming = ["polars-plan/streaming", "polars-ops/chunked_ids"]
 parquet = ["polars-io/parquet", "polars-plan/parquet"]
+hdf5 = ["polars-io/hdf5", "polars-plan/hdf5"]
 temporal = [
   "dtype-datetime",
   "dtype-date",
@@ -54,9 +55,17 @@ dtype-full = [
 dtype-array = ["polars-plan/dtype-array", "polars-ops/dtype-array"]
 dtype-categorical = ["polars-plan/dtype-categorical"]
 dtype-date = ["polars-plan/dtype-date", "polars-time/dtype-date", "temporal"]
-dtype-datetime = ["polars-plan/dtype-datetime", "polars-time/dtype-datetime", "temporal"]
+dtype-datetime = [
+  "polars-plan/dtype-datetime",
+  "polars-time/dtype-datetime",
+  "temporal",
+]
 dtype-decimal = ["polars-plan/dtype-decimal"]
-dtype-duration = ["polars-plan/dtype-duration", "polars-time/dtype-duration", "temporal"]
+dtype-duration = [
+  "polars-plan/dtype-duration",
+  "polars-time/dtype-duration",
+  "temporal",
+]
 dtype-i16 = ["polars-plan/dtype-i16"]
 dtype-i8 = ["polars-plan/dtype-i8"]
 dtype-struct = ["polars-plan/dtype-struct", "polars-ops/dtype-struct"]

@@ -103,7 +103,7 @@ polars-lazy = { version = "0.41.2", path = "crates/polars-lazy", default-feature
 polars-mem-engine = { version = "0.41.2", path = "crates/polars-mem-engine", default-features = false }
 polars-ops = { version = "0.41.2", path = "crates/polars-ops", default-features = false }
 polars-parquet = { version = "0.41.2", path = "crates/polars-parquet", default-features = false }
-polars-hdf5 = { version = "0.40.0", path = "crates/polars-hdf5", default-features = false }
+polars-hdf5 = { version = "0.41.2", path = "crates/polars-hdf5", default-features = false }
 polars-pipe = { version = "0.41.2", path = "crates/polars-pipe", default-features = false }
 polars-plan = { version = "0.41.2", path = "crates/polars-plan", default-features = false }
 polars-row = { version = "0.41.2", path = "crates/polars-row", default-features = false }
