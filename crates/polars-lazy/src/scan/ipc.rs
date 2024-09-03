@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use polars_core::prelude::*;
 use polars_io::cloud::CloudOptions;
 use polars_io::ipc::IpcScanOptions;
-use polars_io::RowIndex;
+use polars_io::{HiveOptions, RowIndex};
 
 use crate::prelude::*;
 
@@ -15,6 +15,8 @@ pub struct ScanArgsIpc {
     pub row_index: Option<RowIndex>,
     pub memory_map: bool,
     pub cloud_options: Option<CloudOptions>,
+    pub hive_options: HiveOptions,
+    pub include_file_paths: Option<Arc<str>>,
 }
 
 impl Default for ScanArgsIpc {
@@ -26,6 +28,8 @@ impl Default for ScanArgsIpc {
             row_index: None,
             memory_map: true,
             cloud_options: Default::default(),
+            hive_options: Default::default(),
+            include_file_paths: None,
         }
     }
 }
@@ -33,21 +37,21 @@ impl Default for ScanArgsIpc {
 #[derive(Clone)]
 struct LazyIpcReader {
     args: ScanArgsIpc,
-    paths: Arc<[PathBuf]>,
+    paths: Arc<Vec<PathBuf>>,
 }
 
 impl LazyIpcReader {
     fn new(args: ScanArgsIpc) -> Self {
         Self {
             args,
-            paths: Arc::new([]),
+            paths: Arc::new(vec![]),
         }
     }
 }
 
 impl LazyFileListReader for LazyIpcReader {
     fn finish(self) -> PolarsResult<LazyFrame> {
-        let paths = self.expand_paths(false)?.0;
+        let paths = self.paths;
         let args = self.args;
 
         let options = IpcScanOptions {
@@ -62,10 +66,12 @@ impl LazyFileListReader for LazyIpcReader {
             args.row_index,
             args.rechunk,
             args.cloud_options,
+            args.hive_options,
+            args.include_file_paths,
         )?
         .build()
         .into();
-        lf.opt_state.file_caching = true;
+        lf.opt_state |= OptState::FILE_CACHING;
 
         Ok(lf)
     }
@@ -78,7 +84,7 @@ impl LazyFileListReader for LazyIpcReader {
         &self.paths
     }
 
-    fn with_paths(mut self, paths: Arc<[PathBuf]>) -> Self {
+    fn with_paths(mut self, paths: Arc<Vec<PathBuf>>) -> Self {
         self.paths = paths;
         self
     }
@@ -109,17 +115,22 @@ impl LazyFileListReader for LazyIpcReader {
     fn row_index(&self) -> Option<&RowIndex> {
         self.args.row_index.as_ref()
     }
+
+    /// [CloudOptions] used to list files.
+    fn cloud_options(&self) -> Option<&CloudOptions> {
+        self.args.cloud_options.as_ref()
+    }
 }
 
 impl LazyFrame {
     /// Create a LazyFrame directly from a ipc scan.
     pub fn scan_ipc(path: impl AsRef<Path>, args: ScanArgsIpc) -> PolarsResult<Self> {
         LazyIpcReader::new(args)
-            .with_paths(Arc::new([path.as_ref().to_path_buf()]))
+            .with_paths(Arc::new(vec![path.as_ref().to_path_buf()]))
             .finish()
     }
 
-    pub fn scan_ipc_files(paths: Arc<[PathBuf]>, args: ScanArgsIpc) -> PolarsResult<Self> {
+    pub fn scan_ipc_files(paths: Arc<Vec<PathBuf>>, args: ScanArgsIpc) -> PolarsResult<Self> {
         LazyIpcReader::new(args).with_paths(paths).finish()
     }
 }

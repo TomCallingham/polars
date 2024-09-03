@@ -40,6 +40,11 @@ fn url_and_creds_to_key(url: &Url, options: Option<&CloudOptions>) -> String {
     )
 }
 
+/// Construct an object_store `Path` from a string without any encoding/decoding.
+pub fn object_path_from_str(path: &str) -> PolarsResult<object_store::path::Path> {
+    object_store::path::Path::parse(path).map_err(to_compute_err)
+}
+
 /// Build an [`ObjectStore`] based on the URL and passed in url. Return the cloud location and an implementation of the object store.
 pub async fn build_object_store(
     url: &str,
@@ -48,9 +53,10 @@ pub async fn build_object_store(
         allow(unused_variables)
     )]
     options: Option<&CloudOptions>,
+    glob: bool,
 ) -> BuildResult {
     let parsed = parse_url(url).map_err(to_compute_err)?;
-    let cloud_location = CloudLocation::from_url(&parsed)?;
+    let cloud_location = CloudLocation::from_url(&parsed, glob)?;
 
     let key = url_and_creds_to_key(&parsed, options);
     let mut allow_cache = true;
@@ -62,7 +68,6 @@ pub async fn build_object_store(
         }
     }
 
-    #[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
     let options = options.map(std::borrow::Cow::Borrowed).unwrap_or_default();
 
     let cloud_type = CloudType::from_url(&parsed)?;
@@ -106,16 +111,14 @@ pub async fn build_object_store(
                 allow_cache = false;
                 #[cfg(feature = "http")]
                 {
-                    let store = object_store::http::HttpBuilder::new()
-                        .with_url(url)
-                        .with_client_options(super::get_client_options())
-                        .build()?;
-                    Ok::<_, PolarsError>(Arc::new(store) as Arc<dyn ObjectStore>)
+                    let store = options.build_http(url)?;
+                    PolarsResult::Ok(Arc::new(store) as Arc<dyn ObjectStore>)
                 }
             }
             #[cfg(not(feature = "http"))]
             return err_missing_feature("http", &cloud_location.scheme);
         },
+        CloudType::Hf => panic!("impl error: unresolved hf:// path"),
     }?;
     if allow_cache {
         let mut cache = OBJECT_STORE_CACHE.write().await;
@@ -126,4 +129,16 @@ pub async fn build_object_store(
         cache.insert(key, store.clone());
     }
     Ok((cloud_location, store))
+}
+
+mod test {
+    #[test]
+    fn test_object_path_from_str() {
+        use super::object_path_from_str;
+
+        let path = "%25";
+        let out = object_path_from_str(path).unwrap();
+
+        assert_eq!(out.as_ref(), path);
+    }
 }

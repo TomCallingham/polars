@@ -1,25 +1,11 @@
 //r Contains the concatenate kernel
-//!
-//! Example:
-//!
-//! ```
-//! use polars_arrow::array::Utf8Array;
-//! use polars_arrow::compute::concatenate::concatenate;
-//!
-//! let arr = concatenate(&[
-//!     &Utf8Array::<i32>::from_slice(["hello", "world"]),
-//!     &Utf8Array::<i32>::from_slice(["!"]),
-//! ]).unwrap();
-//! assert_eq!(arr.len(), 3);
-//! ```
-
 use polars_error::{polars_bail, PolarsResult};
 
 use crate::array::growable::make_growable;
 use crate::array::Array;
 use crate::bitmap::{Bitmap, MutableBitmap};
 
-/// Concatenate multiple [Array] of the same type into a single [`Array`].
+/// Concatenate multiple [`Array`] of the same type into a single [`Array`].
 pub fn concatenate(arrays: &[&dyn Array]) -> PolarsResult<Box<dyn Array>> {
     if arrays.is_empty() {
         polars_bail!(InvalidOperation: "concat requires input of at least one array")

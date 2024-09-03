@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from typing import Literal
 
     from polars import Expr, Series
-    from polars.type_aliases import Ambiguous, IntoExpr, SchemaDict, TimeUnit
+    from polars._typing import Ambiguous, IntoExpr, SchemaDict, TimeUnit
 
 
 def datetime_(
@@ -596,15 +596,18 @@ def struct(
     Schema({'my_struct': Struct({'p': Int64, 'q': Boolean})})
     """
     pyexprs = parse_into_list_of_expressions(*exprs, **named_exprs)
-    expr = wrap_expr(plr.as_struct(pyexprs))
 
     if schema:
-        if not exprs:
+        if not exprs and not named_exprs:
             # no columns or expressions provided; create one from schema keys
             expr = wrap_expr(
                 plr.as_struct(parse_into_list_of_expressions(list(schema.keys())))
             )
+        else:
+            expr = wrap_expr(plr.as_struct(pyexprs))
         expr = expr.cast(Struct(schema), strict=False)
+    else:
+        expr = wrap_expr(plr.as_struct(pyexprs))
 
     if eager:
         return F.select(expr).to_series()

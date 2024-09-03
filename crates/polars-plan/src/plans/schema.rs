@@ -51,20 +51,18 @@ impl FileInfo {
     }
 
     /// Merge the [`Schema`] of a [`HivePartitions`] with the schema of this [`FileInfo`].
-    ///
-    /// Returns an `Err` if any of the columns in either schema overlap.
-    pub fn update_schema_with_hive_schema(&mut self, hive_schema: SchemaRef) -> PolarsResult<()> {
-        let expected_len = self.schema.len() + hive_schema.len();
+    pub fn update_schema_with_hive_schema(&mut self, hive_schema: SchemaRef) {
+        let schema = Arc::make_mut(&mut self.schema);
 
-        let file_schema = Arc::make_mut(&mut self.schema);
-        file_schema.merge(Arc::unwrap_or_clone(hive_schema));
-
-        polars_ensure!(
-            file_schema.len() == expected_len,
-            Duplicate: "invalid Hive partition schema\n\n\
-            Extending the schema with the Hive partition schema would create duplicate fields."
-        );
-        Ok(())
+        for field in hive_schema.iter_fields() {
+            if let Ok(existing) = schema.try_get_mut(&field.name) {
+                *existing = field.data_type().clone();
+            } else {
+                schema
+                    .insert_at_index(schema.len(), field.name, field.dtype.clone())
+                    .unwrap();
+            }
+        }
     }
 }
 
@@ -246,6 +244,52 @@ pub(crate) fn det_join_schema(
         // the schema will never change.
         #[cfg(feature = "semi_anti_join")]
         JoinType::Semi | JoinType::Anti => Ok(schema_left.clone()),
+        JoinType::Right => {
+            // Get join names.
+            let mut arena = Arena::with_capacity(8);
+            let mut join_on_left: PlHashSet<_> = PlHashSet::with_capacity(left_on.len());
+            for e in left_on {
+                let field = e.to_field_amortized(schema_left, Context::Default, &mut arena)?;
+                join_on_left.insert(field.name);
+            }
+
+            let mut join_on_right: PlHashSet<_> = PlHashSet::with_capacity(right_on.len());
+            for e in right_on {
+                let field = e.to_field_amortized(schema_right, Context::Default, &mut arena)?;
+                join_on_right.insert(field.name);
+            }
+
+            // init
+            let mut new_schema = Schema::with_capacity(schema_left.len() + schema_right.len());
+            let should_coalesce = options.args.should_coalesce();
+
+            // Prepare left table schema
+            if !should_coalesce {
+                for (name, dtype) in schema_left.iter() {
+                    new_schema.with_column(name.clone(), dtype.clone());
+                }
+            } else {
+                for (name, dtype) in schema_left.iter() {
+                    if !join_on_left.contains(name) {
+                        new_schema.with_column(name.clone(), dtype.clone());
+                    }
+                }
+            }
+
+            // Prepare right table schema
+            for (name, dtype) in schema_right.iter() {
+                {
+                    let left_is_removed = join_on_left.contains(name.as_str()) && should_coalesce;
+                    if schema_left.contains(name.as_str()) && !left_is_removed {
+                        let new_name = format_smartstring!("{}{}", name, options.args.suffix());
+                        new_schema.with_column(new_name, dtype.clone());
+                    } else {
+                        new_schema.with_column(name.clone(), dtype.clone());
+                    }
+                }
+            }
+            Ok(Arc::new(new_schema))
+        },
         _how => {
             let mut new_schema = Schema::with_capacity(schema_left.len() + schema_right.len());
 
@@ -254,17 +298,10 @@ pub(crate) fn det_join_schema(
             }
             let should_coalesce = options.args.should_coalesce();
 
-            // make sure that expression are assigned to the schema
-            // an expression can have an alias, and change a dtype.
-            // we only do this for the left hand side as the right hand side
-            // is dropped.
             let mut arena = Arena::with_capacity(8);
-            for e in left_on {
-                let field = e.to_field_amortized(schema_left, Context::Default, &mut arena)?;
-                new_schema.with_column(field.name, field.dtype);
-                arena.clear();
-            }
-            // Except in asof joins. Asof joins are not equi-joins
+
+            // Handles coalescing of asof-joins.
+            // Asof joins are not equi-joins
             // so the columns that are joined on, may have different
             // values so if the right has a different name, it is added to the schema
             #[cfg(feature = "asof_join")]
@@ -286,33 +323,29 @@ pub(crate) fn det_join_schema(
                     }
                 }
             }
-
             let mut join_on_right: PlHashSet<_> = PlHashSet::with_capacity(right_on.len());
             for e in right_on {
                 let field = e.to_field_amortized(schema_right, Context::Default, &mut arena)?;
                 join_on_right.insert(field.name);
             }
 
-            // Asof joins are special, if the names are equal they will not be coalesced.
             for (name, dtype) in schema_right.iter() {
-                if !join_on_right.contains(name.as_str()) || (!should_coalesce)
-                // The names that are joined on are merged
-                {
-                    if schema_left.contains(name.as_str()) {
-                        #[cfg(feature = "asof_join")]
-                        if let JoinType::AsOf(asof_options) = &options.args.how {
-                            if let (Some(left_by), Some(right_by)) =
-                                (&asof_options.left_by, &asof_options.right_by)
+                if !join_on_right.contains(name.as_str()) || (!should_coalesce) {
+                    // Asof join by columns are coalesced
+                    #[cfg(feature = "asof_join")]
+                    if let JoinType::AsOf(asof_options) = &options.args.how {
+                        if let Some(right_by) = &asof_options.right_by {
                             {
-                                {
-                                    // Do not add suffix. The column of the left table will be used
-                                    if left_by.contains(name) && right_by.contains(name) {
-                                        continue;
-                                    }
+                                // Do not add suffix. The column of the left table will be used
+                                if right_by.contains(name) {
+                                    continue;
                                 }
                             }
                         }
+                    }
 
+                    // The names that are joined on are merged
+                    if schema_left.contains(name.as_str()) {
                         let new_name = format_smartstring!("{}{}", name, options.args.suffix());
                         new_schema.with_column(new_name, dtype.clone());
                     } else {

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import gzip
 import io
-import os
 import sys
 import textwrap
 import zlib
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal as D
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, TypedDict
 
@@ -24,7 +24,7 @@ from polars.testing import assert_frame_equal, assert_series_equal
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from polars.type_aliases import TimeUnit
+    from polars._typing import TimeUnit
     from tests.unit.conftest import MemoryUsage
 
 
@@ -110,6 +110,19 @@ def test_normalize_filepath(io_files_path: Path) -> None:
     assert normalize_filepath(str(io_files_path), check_not_directory=False) == str(
         io_files_path
     )
+
+
+def test_infer_schema_false() -> None:
+    csv = textwrap.dedent(
+        """\
+        a,b,c
+        1,2,3
+        1,2,3
+        """
+    )
+    f = io.StringIO(csv)
+    df = pl.read_csv(f, infer_schema=False)
+    assert df.dtypes == [pl.String, pl.String, pl.String]
 
 
 def test_csv_null_values() -> None:
@@ -513,7 +526,9 @@ def test_column_rename_and_dtype_overwrite() -> None:
     assert df.dtypes == [pl.String, pl.Int64, pl.Float32]
 
 
-def test_compressed_csv(io_files_path: Path) -> None:
+def test_compressed_csv(io_files_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLARS_FORCE_ASYNC", "0")
+
     # gzip compression
     csv = textwrap.dedent(
         """\
@@ -564,11 +579,8 @@ def test_compressed_csv(io_files_path: Path) -> None:
 
     # zstd compressed file
     csv_file = io_files_path / "zstd_compressed.csv.zst"
-    with pytest.raises(
-        ComputeError,
-        match="cannot scan compressed csv; use `read_csv` for compressed data",
-    ):
-        pl.scan_csv(csv_file).collect()
+    out = pl.scan_csv(csv_file, truncate_ragged_lines=True).collect()
+    assert_frame_equal(out, expected)
     out = pl.read_csv(str(csv_file), truncate_ragged_lines=True)
     assert_frame_equal(out, expected)
 
@@ -631,12 +643,12 @@ def test_empty_line_with_multiple_columns() -> None:
 
 def test_preserve_whitespace_at_line_start() -> None:
     df = pl.read_csv(
-        b"a\n  b  \n    c\nd",
+        b"   a\n  b  \n    c\nd",
         new_columns=["A"],
         has_header=False,
         use_pyarrow=False,
     )
-    expected = pl.DataFrame({"A": ["a", "  b  ", "    c", "d"]})
+    expected = pl.DataFrame({"A": ["   a", "  b  ", "    c", "d"]})
     assert_frame_equal(df, expected)
 
 
@@ -854,18 +866,24 @@ def test_csv_globbing(io_files_path: Path) -> None:
     df = pl.read_csv(path)
     assert df.shape == (135, 4)
 
-    with pytest.raises(ValueError):
-        _ = pl.read_csv(path, columns=[0, 1])
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("POLARS_FORCE_ASYNC", "0")
+
+        with pytest.raises(ValueError):
+            _ = pl.read_csv(path, columns=[0, 1])
 
     df = pl.read_csv(path, columns=["category", "sugars_g"])
     assert df.shape == (135, 2)
     assert df.row(-1) == ("seafood", 1)
     assert df.row(0) == ("vegetables", 2)
 
-    with pytest.raises(ValueError):
-        _ = pl.read_csv(
-            path, schema_overrides=[pl.String, pl.Int64, pl.Int64, pl.Int64]
-        )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("POLARS_FORCE_ASYNC", "0")
+
+        with pytest.raises(ValueError):
+            _ = pl.read_csv(
+                path, schema_overrides=[pl.String, pl.Int64, pl.Int64, pl.Int64]
+            )
 
     dtypes = {
         "category": pl.String,
@@ -1743,8 +1761,6 @@ A,B
 
 
 def test_write_csv_stdout_stderr(capsys: pytest.CaptureFixture[str]) -> None:
-    # The capsys fixture allows pytest to access stdout/stderr. See
-    # https://docs.pytest.org/en/7.1.x/how-to/capture-stdout-stderr.html
     df = pl.DataFrame(
         {
             "numbers": [1, 2, 3],
@@ -1752,8 +1768,6 @@ def test_write_csv_stdout_stderr(capsys: pytest.CaptureFixture[str]) -> None:
             "dates": [date(2023, 1, 1), date(2023, 1, 2), date(2023, 1, 3)],
         }
     )
-
-    # pytest hijacks sys.stdout and changes its type, which causes mypy failure
     df.write_csv(sys.stdout)
     captured = capsys.readouterr()
     assert captured.out == (
@@ -1805,34 +1819,35 @@ def test_csv_quote_styles() -> None:
             "date": [dt, None, dt],
             "datetime": [None, dtm, dtm],
             "time": [tm, tm, None],
+            "decimal": [D("1.0"), D("2.0"), None],
         }
     )
 
     assert df.write_csv(quote_style="always", **temporal_formats) == (
-        '"float","string","int","bool","date","datetime","time"\n'
-        '"1.0","a","1","true","2077-07-05","","03:01:00"\n'
-        '"2.0","a,bc","2","false","","2077-07-05T03:01:00","03:01:00"\n'
-        '"","""hello","3","","2077-07-05","2077-07-05T03:01:00",""\n'
+        '"float","string","int","bool","date","datetime","time","decimal"\n'
+        '"1.0","a","1","true","2077-07-05","","03:01:00","1.0"\n'
+        '"2.0","a,bc","2","false","","2077-07-05T03:01:00","03:01:00","2.0"\n'
+        '"","""hello","3","","2077-07-05","2077-07-05T03:01:00","",""\n'
     )
     assert df.write_csv(quote_style="necessary", **temporal_formats) == (
-        "float,string,int,bool,date,datetime,time\n"
-        "1.0,a,1,true,2077-07-05,,03:01:00\n"
-        '2.0,"a,bc",2,false,,2077-07-05T03:01:00,03:01:00\n'
-        ',"""hello",3,,2077-07-05,2077-07-05T03:01:00,\n'
+        "float,string,int,bool,date,datetime,time,decimal\n"
+        '1.0,a,1,true,2077-07-05,,03:01:00,"1.0"\n'
+        '2.0,"a,bc",2,false,,2077-07-05T03:01:00,03:01:00,"2.0"\n'
+        ',"""hello",3,,2077-07-05,2077-07-05T03:01:00,,""\n'
     )
     assert df.write_csv(quote_style="never", **temporal_formats) == (
-        "float,string,int,bool,date,datetime,time\n"
-        "1.0,a,1,true,2077-07-05,,03:01:00\n"
-        "2.0,a,bc,2,false,,2077-07-05T03:01:00,03:01:00\n"
-        ',"hello,3,,2077-07-05,2077-07-05T03:01:00,\n'
+        "float,string,int,bool,date,datetime,time,decimal\n"
+        "1.0,a,1,true,2077-07-05,,03:01:00,1.0\n"
+        "2.0,a,bc,2,false,,2077-07-05T03:01:00,03:01:00,2.0\n"
+        ',"hello,3,,2077-07-05,2077-07-05T03:01:00,,\n'
     )
     assert df.write_csv(
         quote_style="non_numeric", quote_char="8", **temporal_formats
     ) == (
-        "8float8,8string8,8int8,8bool8,8date8,8datetime8,8time8\n"
-        "1.0,8a8,1,8true8,82077-07-058,,803:01:008\n"
-        "2.0,8a,bc8,2,8false8,,82077-07-05T03:01:008,803:01:008\n"
-        ',8"hello8,3,,82077-07-058,82077-07-05T03:01:008,\n'
+        "8float8,8string8,8int8,8bool8,8date8,8datetime8,8time8,8decimal8\n"
+        "1.0,8a8,1,8true8,82077-07-058,,803:01:008,81.08\n"
+        "2.0,8a,bc8,2,8false8,,82077-07-05T03:01:008,803:01:008,82.08\n"
+        ',8"hello8,3,,82077-07-058,82077-07-05T03:01:008,,88\n'
     )
 
 
@@ -1994,7 +2009,11 @@ def test_invalid_csv_raise() -> None:
 
 
 @pytest.mark.write_disk()
-def test_partial_read_compressed_file(tmp_path: Path) -> None:
+def test_partial_read_compressed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("POLARS_FORCE_ASYNC", "0")
+
     df = pl.DataFrame(
         {"idx": range(1_000), "dt": date(2025, 12, 31), "txt": "hello world"}
     )
@@ -2159,29 +2178,18 @@ def test_csv_float_decimal() -> None:
         pl.read_csv(floats, decimal_comma=True)
 
 
-def test_fsspec_not_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("polars.io._utils._FSSPEC_AVAILABLE", False)
-    with pytest.raises(
-        ImportError, match=r"`fsspec` is required for `storage_options` argument"
-    ):
-        pl.read_csv(
-            "s3://foods/cabbage.csv", storage_options={"key": "key", "secret": "secret"}
-        )
+def test_fsspec_not_available() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("POLARS_FORCE_ASYNC", "0")
+        mp.setattr("polars.io._utils._FSSPEC_AVAILABLE", False)
 
-
-@pytest.mark.write_disk()
-@pytest.mark.skipif(
-    os.environ.get("POLARS_FORCE_ASYNC") == "1" or sys.platform == "win32",
-    reason="only local",
-)
-def test_no_glob(tmpdir: Path) -> None:
-    df = pl.DataFrame({"foo": 1})
-    p = tmpdir / "*.csv"
-    df.write_csv(str(p))
-    p = tmpdir / "*1.csv"
-    df.write_csv(str(p))
-    p = tmpdir / "*.csv"
-    assert_frame_equal(pl.read_csv(str(p), glob=False), df)
+        with pytest.raises(
+            ImportError, match=r"`fsspec` is required for `storage_options` argument"
+        ):
+            pl.read_csv(
+                "s3://foods/cabbage.csv",
+                storage_options={"key": "key", "secret": "secret"},
+            )
 
 
 def test_read_csv_dtypes_deprecated() -> None:
@@ -2223,3 +2231,52 @@ a,b,c,d
 
     out = pl.scan_csv(path).select(columns).collect().columns
     assert out == columns
+
+
+@pytest.mark.write_disk()
+def test_write_csv_to_dangling_file_17328(
+    df_no_lists: pl.DataFrame, tmp_path: Path
+) -> None:
+    tmp_path.mkdir(exist_ok=True)
+    df_no_lists.write_csv((tmp_path / "dangling.csv").open("w"))
+
+
+def test_write_csv_raise_on_non_utf8_17328(
+    df_no_lists: pl.DataFrame, tmp_path: Path
+) -> None:
+    tmp_path.mkdir(exist_ok=True)
+    with pytest.raises(InvalidOperationError, match="file encoding is not UTF-8"):
+        df_no_lists.write_csv((tmp_path / "dangling.csv").open("w", encoding="gbk"))
+
+
+@pytest.mark.write_disk()
+def test_write_csv_appending_17543(tmp_path: Path) -> None:
+    tmp_path.mkdir(exist_ok=True)
+    df = pl.DataFrame({"col": ["value"]})
+    with (tmp_path / "append.csv").open("w") as f:
+        f.write("# test\n")
+        df.write_csv(f)
+    with (tmp_path / "append.csv").open("r") as f:
+        assert f.readline() == "# test\n"
+        assert pl.read_csv(f).equals(df)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "df"),
+    [
+        (pl.Decimal(scale=2), pl.DataFrame({"x": ["0.1"]}).cast(pl.Decimal(scale=2))),
+        (pl.Categorical, pl.DataFrame({"x": ["A"]})),
+        (
+            pl.Time,
+            pl.DataFrame({"x": ["12:15:00"]}).with_columns(
+                pl.col("x").str.strptime(pl.Time)
+            ),
+        ),
+    ],
+)
+def test_read_csv_cast_unparsable_later(
+    dtype: pl.Decimal | pl.Categorical | pl.Time, df: pl.DataFrame
+) -> None:
+    f = io.BytesIO()
+    df.write_csv(f)
+    assert df.equals(pl.read_csv(f, schema={"x": dtype}))

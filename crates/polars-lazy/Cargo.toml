@@ -25,7 +25,6 @@ polars-utils = { workspace = true }
 
 ahash = { workspace = true }
 bitflags = { workspace = true }
-glob = { version = "0.3" }
 memchr = { workspace = true }
 once_cell = { workspace = true }
 pyo3 = { workspace = true, optional = true }
@@ -234,7 +233,7 @@ arg_where = ["polars-plan/arg_where"]
 search_sorted = ["polars-plan/search_sorted"]
 merge_sorted = ["polars-plan/merge_sorted"]
 meta = ["polars-plan/meta"]
-pivot = ["polars-core/rows", "polars-ops/pivot"]
+pivot = ["polars-core/rows", "polars-ops/pivot", "polars-plan/pivot"]
 top_k = ["polars-plan/top_k"]
 semi_anti_join = ["polars-plan/semi_anti_join"]
 cse = ["polars-plan/cse", "polars-mem-engine/cse"]
@@ -271,6 +270,7 @@ binary_encoding = ["polars-plan/binary_encoding"]
 string_encoding = ["polars-plan/string_encoding"]
 
 bigidx = ["polars-plan/bigidx"]
+polars_cloud = ["polars-plan/polars_cloud"]
 
 panic_on_schema = ["polars-plan/panic_on_schema", "polars-expr/panic_on_schema"]
 

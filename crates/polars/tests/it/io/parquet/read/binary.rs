@@ -1,8 +1,10 @@
+use polars_parquet::parquet::encoding::hybrid_rle::FnTranslator;
 use polars_parquet::parquet::error::ParquetResult;
 use polars_parquet::parquet::page::DataPage;
 
 use super::dictionary::BinaryPageDict;
 use super::utils::deserialize_optional;
+use crate::io::parquet::read::hybrid_rle_iter;
 use crate::io::parquet::read::utils::FixedLenBinaryPageState;
 
 pub fn page_to_vec(
@@ -22,13 +24,13 @@ pub fn page_to_vec(
             .map(Some)
             .map(|x| x.transpose())
             .collect(),
-        FixedLenBinaryPageState::RequiredDictionary(dict) => dict
-            .indexes
-            .map(|x| dict.dict.value(x as usize).map(|x| x.to_vec()).map(Some))
-            .collect(),
+        FixedLenBinaryPageState::RequiredDictionary(dict) => {
+            let dictionary =
+                FnTranslator(|v| dict.dict.value(v as usize).map(|v| Some(v.to_vec())));
+            dict.indexes.translate_and_collect(&dictionary)
+        },
         FixedLenBinaryPageState::OptionalDictionary(validity, dict) => {
-            let values = dict
-                .indexes
+            let values = hybrid_rle_iter(dict.indexes)?
                 .map(|x| dict.dict.value(x as usize).map(|x| x.to_vec()));
             deserialize_optional(validity, values)
         },

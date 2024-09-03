@@ -15,16 +15,16 @@ use super::buffer::init_buffers;
 use super::options::{CommentPrefix, CsvEncoding, NullValues, NullValuesCompiled};
 use super::parser::{
     get_line_stats, is_comment_line, next_line_position, next_line_position_naive, parse_lines,
-    skip_bom, skip_line_ending, skip_this_line, skip_whitespace_exclude,
+    skip_bom, skip_line_ending, skip_this_line,
 };
 use super::schema_inference::{check_decimal_comma, infer_file_schema};
 #[cfg(any(feature = "decompress", feature = "decompress-fast"))]
 use super::utils::decompress;
 use super::utils::get_file_chunks;
-#[cfg(not(any(feature = "decompress", feature = "decompress-fast")))]
-use super::utils::is_compressed;
 use crate::mmap::ReaderBytes;
 use crate::predicates::PhysicalIoExpr;
+#[cfg(not(any(feature = "decompress", feature = "decompress-fast")))]
+use crate::utils::is_compressed;
 use crate::utils::update_row_counts;
 use crate::RowIndex;
 
@@ -41,6 +41,12 @@ pub(crate) fn cast_columns(
                 .str()
                 .unwrap()
                 .as_date(None, false)
+                .map(|ca| ca.into_series()),
+            #[cfg(feature = "temporal")]
+            (DataType::String, DataType::Time) => s
+                .str()
+                .unwrap()
+                .as_time(None, false)
                 .map(|ca| ca.into_series()),
             #[cfg(feature = "temporal")]
             (DataType::String, DataType::Datetime(tu, _)) => s
@@ -272,8 +278,9 @@ impl<'a> CoreReader<'a> {
     ) -> PolarsResult<(&'b [u8], Option<usize>)> {
         let starting_point_offset = bytes.as_ptr() as usize;
 
-        // Skip all leading white space and the occasional utf8-bom
-        bytes = skip_whitespace_exclude(skip_bom(bytes), self.separator);
+        // Skip utf8 byte-order-mark (BOM)
+        bytes = skip_bom(bytes);
+
         // \n\n can be a empty string row of a single column
         // in other cases we skip it.
         if self.schema.len() > 1 {
@@ -475,9 +482,9 @@ impl<'a> CoreReader<'a> {
         // An empty file with a schema should return an empty DataFrame with that schema
         if bytes.is_empty() {
             let mut df = if projection.len() == self.schema.len() {
-                DataFrame::from(self.schema.as_ref())
+                DataFrame::empty_with_schema(self.schema.as_ref())
             } else {
-                DataFrame::from(
+                DataFrame::empty_with_schema(
                     &projection
                         .iter()
                         .map(|&i| self.schema.get_at_index(i).unwrap())

@@ -1,4 +1,5 @@
 mod positioning;
+mod unpivot;
 
 use std::borrow::Cow;
 
@@ -7,6 +8,7 @@ use polars_core::frame::group_by::expr::PhysicalAggExpr;
 use polars_core::prelude::*;
 use polars_core::utils::_split_offsets;
 use polars_core::{downcast_as_macro_arg_physical, POOL};
+pub use unpivot::UnpivotDF;
 
 const HASHMAP_INIT_SIZE: usize = 512;
 
@@ -235,7 +237,9 @@ fn pivot_impl(
             polars_bail!(ComputeError: "cannot use column name {column} that \
             already exists in the DataFrame. Please rename it prior to calling `pivot`.")
         }
-        let columns_struct = StructChunked::new(&column, fields).unwrap().into_series();
+        let columns_struct = StructChunked::from_series(&column, fields)
+            .unwrap()
+            .into_series();
         let mut binding = pivot_df.clone();
         let pivot_df = unsafe { binding.with_column_unchecked(columns_struct) };
         pivot_impl_single_column(

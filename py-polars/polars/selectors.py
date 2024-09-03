@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     import sys
 
     from polars import DataFrame, LazyFrame
-    from polars.type_aliases import PolarsDataType, SelectorType, TimeUnit
+    from polars._typing import PolarsDataType, SelectorType, TimeUnit
 
     if sys.version_info >= (3, 11):
         from typing import Self
@@ -87,8 +87,7 @@ __all__ = [
 
 
 @overload
-def is_selector(obj: _selector_proxy_) -> Literal[True]:  # type: ignore[overload-overlap]
-    ...
+def is_selector(obj: _selector_proxy_) -> Literal[True]: ...
 
 
 @overload
@@ -112,6 +111,8 @@ def is_selector(obj: Any) -> bool:
     return isinstance(obj, _selector_proxy_) and hasattr(obj, "_attrs")
 
 
+# TODO: Don't use this as it collects a schema (can be very expensive for LazyFrame).
+#  This should move to IR conversion / Rust.
 def expand_selector(
     target: DataFrame | LazyFrame | Mapping[str, PolarsDataType],
     selector: SelectorType | Expr,
@@ -191,6 +192,8 @@ def expand_selector(
     return tuple(target.select(selector).collect_schema())
 
 
+# TODO: Don't use this as it collects a schema (can be very expensive for LazyFrame).
+#  This should move to IR conversion / Rust.
 def _expand_selectors(frame: DataFrame | LazyFrame, *items: Any) -> list[Any]:
     """
     Internal function that expands any selectors to column names in the given input.
@@ -1047,8 +1050,11 @@ def by_index(*indices: int | range | Sequence[int | range]) -> SelectorType:
     for idx in indices:
         if isinstance(idx, (range, Sequence)):
             all_indices.extend(idx)  # type: ignore[arg-type]
-        else:
+        elif isinstance(idx, int):
             all_indices.append(idx)
+        else:
+            msg = f"invalid index value: {idx!r}"
+            raise TypeError(msg)
 
     return _selector_proxy_(
         F.nth(*all_indices), name="by_index", parameters={"*indices": indices}
@@ -2488,7 +2494,7 @@ def starts_with(*prefix: str) -> SelectorType:
 
 def string(*, include_categorical: bool = False) -> SelectorType:
     """
-    Select all String (and, optionally, Categorical) string columns .
+    Select all String (and, optionally, Categorical) string columns.
 
     See Also
     --------

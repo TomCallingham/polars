@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from typing import Awaitable, Collection, Literal
 
     from polars import DataFrame, Expr, LazyFrame, Series
-    from polars.type_aliases import (
+    from polars._typing import (
         CorrelationMethod,
         EpochTimeUnit,
         IntoExpr,
@@ -2108,7 +2108,7 @@ def rolling_cov(
         The number of values in the window that should be non-null before computing
         a result. If None, it will be set equal to window size.
     ddof
-        Delta degrees of freedom.  The divisor used in calculations
+        Delta degrees of freedom. The divisor used in calculations
         is `N - ddof`, where `N` represents the number of elements.
     """
     if min_periods is None:
@@ -2153,7 +2153,7 @@ def rolling_corr(
         The number of values in the window that should be non-null before computing
         a result. If None, it will be set equal to window size.
     ddof
-        Delta degrees of freedom.  The divisor used in calculations
+        Delta degrees of freedom. The divisor used in calculations
         is `N - ddof`, where `N` represents the number of elements.
     """
     if min_periods is None:

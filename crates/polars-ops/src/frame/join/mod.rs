@@ -4,6 +4,7 @@ mod asof;
 #[cfg(feature = "dtype-categorical")]
 mod checks;
 mod cross_join;
+mod dispatch_left_right;
 mod general;
 mod hash_join;
 #[cfg(feature = "merge_sorted")]
@@ -13,7 +14,6 @@ use std::borrow::Cow;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 
-use ahash::RandomState;
 pub use args::*;
 use arrow::trusted_len::TrustedLen;
 #[cfg(feature = "asof_join")]
@@ -209,8 +209,24 @@ pub trait DataFrameJoinOps: IntoDf {
             return match args.how {
                 JoinType::Inner => left_df
                     ._inner_join_from_series(other, s_left, s_right, args, _verbose, drop_names),
-                JoinType::Left => left_df
-                    ._left_join_from_series(other, s_left, s_right, args, _verbose, drop_names),
+                JoinType::Left => dispatch_left_right::left_join_from_series(
+                    self.to_df().clone(),
+                    other,
+                    s_left,
+                    s_right,
+                    args,
+                    _verbose,
+                    drop_names,
+                ),
+                JoinType::Right => dispatch_left_right::right_join_from_series(
+                    self.to_df(),
+                    other.clone(),
+                    s_left,
+                    s_right,
+                    args,
+                    _verbose,
+                    drop_names,
+                ),
                 JoinType::Full => left_df._full_join_from_series(other, s_left, s_right, args),
                 #[cfg(feature = "semi_anti_join")]
                 JoinType::Anti => left_df._semi_anti_join_from_series(
@@ -306,8 +322,18 @@ pub trait DataFrameJoinOps: IntoDf {
                 _verbose,
                 drop_names.as_deref(),
             ),
-            JoinType::Left => left_df._left_join_from_series(
+            JoinType::Left => dispatch_left_right::left_join_from_series(
+                left_df.clone(),
                 other,
+                &lhs_keys,
+                &rhs_keys,
+                args,
+                _verbose,
+                drop_names.as_deref(),
+            ),
+            JoinType::Right => dispatch_left_right::right_join_from_series(
+                left_df,
+                other.clone(),
                 &lhs_keys,
                 &rhs_keys,
                 args,

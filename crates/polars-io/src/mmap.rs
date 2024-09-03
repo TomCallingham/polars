@@ -2,30 +2,39 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use memmap::Mmap;
 use once_cell::sync::Lazy;
 use polars_core::config::verbose;
 use polars_error::{polars_bail, PolarsResult};
-use polars_utils::create_file;
+use polars_utils::mmap::MemSlice;
 
 // Keep track of memory mapped files so we don't write to them while reading
 // Use a btree as it uses less memory than a hashmap and this thing never shrinks.
-static MEMORY_MAPPED_FILES: Lazy<Mutex<BTreeMap<PathBuf, u32>>> =
+// Write handle in Windows is exclusive, so this is only necessary in Unix.
+#[cfg(target_family = "unix")]
+static MEMORY_MAPPED_FILES: Lazy<Mutex<BTreeMap<(u64, u64), u32>>> =
     Lazy::new(|| Mutex::new(Default::default()));
 
 pub(crate) struct MMapSemaphore {
-    path: PathBuf,
+    #[cfg(target_family = "unix")]
+    key: (u64, u64),
     mmap: Mmap,
 }
 
 impl MMapSemaphore {
-    pub(super) fn new(path: PathBuf, mmap: Mmap) -> Self {
+    #[cfg(target_family = "unix")]
+    pub(super) fn new(dev: u64, ino: u64, mmap: Mmap) -> Self {
         let mut guard = MEMORY_MAPPED_FILES.lock().unwrap();
-        guard.insert(path.clone(), 1);
-        Self { path, mmap }
+        let key = (dev, ino);
+        guard.insert(key, 1);
+        Self { key, mmap }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    pub(super) fn new(mmap: Mmap) -> Self {
+        Self { mmap }
     }
 }
 
@@ -36,10 +45,11 @@ impl AsRef<[u8]> for MMapSemaphore {
     }
 }
 
+#[cfg(target_family = "unix")]
 impl Drop for MMapSemaphore {
     fn drop(&mut self) {
         let mut guard = MEMORY_MAPPED_FILES.lock().unwrap();
-        if let Entry::Occupied(mut e) = guard.entry(std::mem::take(&mut self.path)) {
+        if let Entry::Occupied(mut e) = guard.entry(self.key) {
             let v = e.get_mut();
             *v -= 1;
 
@@ -50,14 +60,17 @@ impl Drop for MMapSemaphore {
     }
 }
 
-/// Open a file to get write access. This will check if the file is currently registered as memory mapped.
-pub fn try_create_file(path: &Path) -> PolarsResult<File> {
-    let guard = MEMORY_MAPPED_FILES.lock().unwrap();
-    if guard.contains_key(path) {
-        polars_bail!(ComputeError: "cannot write to file: already memory mapped")
+pub fn ensure_not_mapped(file: &File) -> PolarsResult<()> {
+    #[cfg(target_family = "unix")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let guard = MEMORY_MAPPED_FILES.lock().unwrap();
+        let metadata = file.metadata()?;
+        if guard.contains_key(&(metadata.dev(), metadata.ino())) {
+            polars_bail!(ComputeError: "cannot write to file: already memory mapped");
+        }
     }
-    drop(guard);
-    create_file(path)
+    Ok(())
 }
 
 /// Trait used to get a hold to file handler or to the underlying bytes
@@ -127,6 +140,18 @@ impl std::ops::Deref for ReaderBytes<'_> {
             Self::Borrowed(ref_bytes) => ref_bytes,
             Self::Owned(vec) => vec,
             Self::Mapped(mmap, _) => mmap,
+        }
+    }
+}
+
+/// Require 'static to force the caller to do any transmute as it's usually much
+/// clearer to see there whether it's sound.
+impl ReaderBytes<'static> {
+    pub fn into_mem_slice(self) -> MemSlice {
+        match self {
+            ReaderBytes::Borrowed(v) => MemSlice::from_slice(v),
+            ReaderBytes::Owned(v) => MemSlice::from_vec(v),
+            ReaderBytes::Mapped(v, _) => MemSlice::from_mmap(Arc::new(v)),
         }
     }
 }

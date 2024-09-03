@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
+from packaging.version import parse as parse_version
 from pydantic import BaseModel, Field, TypeAdapter
 
 import polars as pl
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
     from zoneinfo import ZoneInfo
 
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 else:
     from polars._utils.convert import string_to_zoneinfo as ZoneInfo
@@ -176,13 +177,13 @@ def test_init_dict() -> None:
 
 
 def test_error_string_dtypes() -> None:
-    with pytest.raises(ValueError, match="cannot infer dtype"):
+    with pytest.raises(TypeError, match="cannot parse input"):
         pl.DataFrame(
             data={"x": [1, 2], "y": [3, 4], "z": [5, 6]},
             schema={"x": "i16", "y": "i32", "z": "f32"},  # type: ignore[dict-item]
         )
 
-    with pytest.raises(ValueError, match="not a valid Polars data type"):
+    with pytest.raises(TypeError, match="cannot parse input"):
         pl.Series("n", [1, 2, 3], dtype="f32")  # type: ignore[arg-type]
 
 
@@ -215,10 +216,10 @@ def test_init_structured_objects() -> None:
     columns = ["timestamp", "ticker", "price", "size"]
 
     for TradeClass in (TradeDC, TradeNT, TradePD):
-        trades = [TradeClass(**dict(zip(columns, values))) for values in raw_data]
+        trades = [TradeClass(**dict(zip(columns, values))) for values in raw_data]  # type: ignore[arg-type]
 
         for DF in (pl.DataFrame, pl.from_records):
-            df = DF(data=trades)  # type: ignore[operator]
+            df = DF(data=trades)
             assert df.schema == {
                 "timestamp": pl.Datetime("us"),
                 "ticker": pl.String,
@@ -228,7 +229,7 @@ def test_init_structured_objects() -> None:
             assert df.rows() == raw_data
 
             # partial dtypes override
-            df = DF(  # type: ignore[operator]
+            df = DF(
                 data=trades,
                 schema_overrides={"timestamp": pl.Datetime("ms"), "size": pl.Int32},
             )
@@ -326,117 +327,120 @@ def test_init_structured_objects_unhashable() -> None:
     assert df.rows() == test_data
 
 
-def test_init_structured_objects_nested() -> None:
-    for Foo, Bar, Baz in (
+@pytest.mark.parametrize(
+    ("foo", "bar", "baz"),
+    [
         (_TestFooDC, _TestBarDC, _TestBazDC),
         (_TestFooPD, _TestBarPD, _TestBazPD),
         (_TestFooNT, _TestBarNT, _TestBazNT),
-    ):
-        data = [
-            Foo(
-                x=100,
-                y=Bar(
-                    a="hello",
-                    b=800,
-                    c=Baz(d=datetime(2023, 4, 12, 10, 30), e=-10.5, f="world"),
-                ),
-            )
-        ]
-        df = pl.DataFrame(data)
-        # shape: (1, 2)
-        # ┌─────┬───────────────────────────────────┐
-        # │ x   ┆ y                                 │
-        # │ --- ┆ ---                               │
-        # │ i64 ┆ struct[3]                         │
-        # ╞═════╪═══════════════════════════════════╡
-        # │ 100 ┆ {"hello",800,{2023-04-12 10:30:0… │
-        # └─────┴───────────────────────────────────┘
-
-        assert df.schema == {
-            "x": pl.Int64,
-            "y": pl.Struct(
-                [
-                    pl.Field("a", pl.String),
-                    pl.Field("b", pl.Int64),
-                    pl.Field(
-                        "c",
-                        pl.Struct(
-                            [
-                                pl.Field("d", pl.Datetime("us")),
-                                pl.Field("e", pl.Float64),
-                                pl.Field("f", pl.String),
-                            ]
-                        ),
-                    ),
-                ]
+    ],
+)
+def test_init_structured_objects_nested(foo: Any, bar: Any, baz: Any) -> None:
+    data = [
+        foo(
+            x=100,
+            y=bar(
+                a="hello",
+                b=800,
+                c=baz(d=datetime(2023, 4, 12, 10, 30), e=-10.5, f="world"),
             ),
+        )
+    ]
+    df = pl.DataFrame(data)
+    # shape: (1, 2)
+    # ┌─────┬───────────────────────────────────┐
+    # │ x   ┆ y                                 │
+    # │ --- ┆ ---                               │
+    # │ i64 ┆ struct[3]                         │
+    # ╞═════╪═══════════════════════════════════╡
+    # │ 100 ┆ {"hello",800,{2023-04-12 10:30:0… │
+    # └─────┴───────────────────────────────────┘
+
+    assert df.schema == {
+        "x": pl.Int64,
+        "y": pl.Struct(
+            [
+                pl.Field("a", pl.String),
+                pl.Field("b", pl.Int64),
+                pl.Field(
+                    "c",
+                    pl.Struct(
+                        [
+                            pl.Field("d", pl.Datetime("us")),
+                            pl.Field("e", pl.Float64),
+                            pl.Field("f", pl.String),
+                        ]
+                    ),
+                ),
+            ]
+        ),
+    }
+    assert df.row(0) == (
+        100,
+        {
+            "a": "hello",
+            "b": 800,
+            "c": {
+                "d": datetime(2023, 4, 12, 10, 30),
+                "e": -10.5,
+                "f": "world",
+            },
+        },
+    )
+
+    # validate nested schema override
+    override_struct_schema: dict[str, PolarsDataType] = {
+        "x": pl.Int16,
+        "y": pl.Struct(
+            [
+                pl.Field("a", pl.String),
+                pl.Field("b", pl.Int32),
+                pl.Field(
+                    name="c",
+                    dtype=pl.Struct(
+                        [
+                            pl.Field("d", pl.Datetime("ms")),
+                            pl.Field("e", pl.Float32),
+                            pl.Field("f", pl.String),
+                        ]
+                    ),
+                ),
+            ]
+        ),
+    }
+    for schema, schema_overrides in (
+        (None, override_struct_schema),
+        (override_struct_schema, None),
+    ):
+        df = (
+            pl.DataFrame(data, schema=schema, schema_overrides=schema_overrides)
+            .unnest("y")
+            .unnest("c")
+        )
+        # shape: (1, 6)
+        # ┌─────┬───────┬─────┬─────────────────────┬───────┬───────┐
+        # │ x   ┆ a     ┆ b   ┆ d                   ┆ e     ┆ f     │
+        # │ --- ┆ ---   ┆ --- ┆ ---                 ┆ ---   ┆ ---   │
+        # │ i16 ┆ str   ┆ i32 ┆ datetime[ms]        ┆ f32   ┆ str   │
+        # ╞═════╪═══════╪═════╪═════════════════════╪═══════╪═══════╡
+        # │ 100 ┆ hello ┆ 800 ┆ 2023-04-12 10:30:00 ┆ -10.5 ┆ world │
+        # └─────┴───────┴─────┴─────────────────────┴───────┴───────┘
+        assert df.schema == {
+            "x": pl.Int16,
+            "a": pl.String,
+            "b": pl.Int32,
+            "d": pl.Datetime("ms"),
+            "e": pl.Float32,
+            "f": pl.String,
         }
         assert df.row(0) == (
             100,
-            {
-                "a": "hello",
-                "b": 800,
-                "c": {
-                    "d": datetime(2023, 4, 12, 10, 30),
-                    "e": -10.5,
-                    "f": "world",
-                },
-            },
+            "hello",
+            800,
+            datetime(2023, 4, 12, 10, 30),
+            -10.5,
+            "world",
         )
-
-        # validate nested schema override
-        override_struct_schema: dict[str, PolarsDataType] = {
-            "x": pl.Int16,
-            "y": pl.Struct(
-                [
-                    pl.Field("a", pl.String),
-                    pl.Field("b", pl.Int32),
-                    pl.Field(
-                        name="c",
-                        dtype=pl.Struct(
-                            [
-                                pl.Field("d", pl.Datetime("ms")),
-                                pl.Field("e", pl.Float32),
-                                pl.Field("f", pl.String),
-                            ]
-                        ),
-                    ),
-                ]
-            ),
-        }
-        for schema, schema_overrides in (
-            (None, override_struct_schema),
-            (override_struct_schema, None),
-        ):
-            df = (
-                pl.DataFrame(data, schema=schema, schema_overrides=schema_overrides)
-                .unnest("y")
-                .unnest("c")
-            )
-            # shape: (1, 6)
-            # ┌─────┬───────┬─────┬─────────────────────┬───────┬───────┐
-            # │ x   ┆ a     ┆ b   ┆ d                   ┆ e     ┆ f     │
-            # │ --- ┆ ---   ┆ --- ┆ ---                 ┆ ---   ┆ ---   │
-            # │ i16 ┆ str   ┆ i32 ┆ datetime[ms]        ┆ f32   ┆ str   │
-            # ╞═════╪═══════╪═════╪═════════════════════╪═══════╪═══════╡
-            # │ 100 ┆ hello ┆ 800 ┆ 2023-04-12 10:30:00 ┆ -10.5 ┆ world │
-            # └─────┴───────┴─────┴─────────────────────┴───────┴───────┘
-            assert df.schema == {
-                "x": pl.Int16,
-                "a": pl.String,
-                "b": pl.Int32,
-                "d": pl.Datetime("ms"),
-                "e": pl.Float32,
-                "f": pl.String,
-            }
-            assert df.row(0) == (
-                100,
-                "hello",
-                800,
-                datetime(2023, 4, 12, 10, 30),
-                -10.5,
-                "world",
-            )
 
 
 def test_dataclasses_initvar_typing() -> None:
@@ -957,8 +961,16 @@ def test_init_pandas(monkeypatch: Any) -> None:
 
     # pandas is not available
     monkeypatch.setattr(pl.dataframe.frame, "_check_for_pandas", lambda x: False)
-    with pytest.raises(TypeError):
-        pl.DataFrame(pandas_df)
+
+    # pandas 2.2 and higher implement the Arrow PyCapsule Interface, so the constructor
+    # will still work even without using pandas APIs
+    if parse_version(pd.__version__) >= parse_version("2.2.0"):
+        df = pl.DataFrame(pandas_df)
+        assert_frame_equal(df, expected)
+
+    else:
+        with pytest.raises(TypeError):
+            pl.DataFrame(pandas_df)
 
 
 def test_init_errors() -> None:
@@ -1029,13 +1041,13 @@ def test_init_records_schema_order() -> None:
             shuffle(data)
             shuffle(cols)
 
-            df = constructor(data, schema=cols)  # type: ignore[operator]
+            df = constructor(data, schema=cols)
             for col in df.columns:
                 assert all(value in (None, lookup[col]) for value in df[col].to_list())
 
         # have schema override inferred types, omit some columns, add a new one
         schema = {"a": pl.Int8, "c": pl.Int16, "e": pl.Int32}
-        df = constructor(data, schema=schema)  # type: ignore[operator]
+        df = constructor(data, schema=schema)
 
         assert df.schema == schema
         for col in df.columns:
@@ -1626,3 +1638,112 @@ def test_array_construction() -> None:
     df = pl.from_dicts(rows, schema=schema)
     assert df.schema == schema
     assert df.rows() == [("a", [1, 2, 3]), ("b", [2, 3, 4])]
+
+
+class PyCapsuleStreamHolder:
+    """
+    Hold the Arrow C Stream pycapsule.
+
+    A class that exposes _only_ the Arrow C Stream interface via Arrow PyCapsules. This
+    ensures that the consumer is seeing _only_ the `__arrow_c_stream__` dunder, and that
+    nothing else (e.g. the dataframe or array interface) is actually being used.
+    """
+
+    arrow_obj: Any
+
+    def __init__(self, arrow_obj: object) -> None:
+        self.arrow_obj = arrow_obj
+
+    def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+        return self.arrow_obj.__arrow_c_stream__(requested_schema)
+
+
+class PyCapsuleArrayHolder:
+    """
+    Hold the Arrow C Array pycapsule.
+
+    A class that exposes _only_ the Arrow C Array interface via Arrow PyCapsules. This
+    ensures that the consumer is seeing _only_ the `__arrow_c_array__` dunder, and that
+    nothing else (e.g. the dataframe or array interface) is actually being used.
+    """
+
+    arrow_obj: Any
+
+    def __init__(self, arrow_obj: object) -> None:
+        self.arrow_obj = arrow_obj
+
+    def __arrow_c_array__(self, requested_schema: object = None) -> object:
+        return self.arrow_obj.__arrow_c_array__(requested_schema)
+
+
+def test_pycapsule_interface(df: pl.DataFrame) -> None:
+    pyarrow_table = df.to_arrow()
+
+    # Array via C data interface
+    pyarrow_array = pyarrow_table["bools"].chunk(0)
+    round_trip_series = pl.Series(PyCapsuleArrayHolder(pyarrow_array))
+    assert df["bools"].equals(round_trip_series, check_dtypes=True, check_names=False)
+
+    # empty Array via C data interface
+    empty_pyarrow_array = pa.array([], type=pyarrow_array.type)
+    round_trip_series = pl.Series(PyCapsuleArrayHolder(empty_pyarrow_array))
+    assert df["bools"].dtype == round_trip_series.dtype
+
+    # RecordBatch via C array interface
+    pyarrow_record_batch = pyarrow_table.to_batches()[0]
+    round_trip_df = pl.DataFrame(PyCapsuleArrayHolder(pyarrow_record_batch))
+    assert df.equals(round_trip_df)
+
+    # ChunkedArray via C stream interface
+    pyarrow_chunked_array = pyarrow_table["bools"]
+    round_trip_series = pl.Series(PyCapsuleStreamHolder(pyarrow_chunked_array))
+    assert df["bools"].equals(round_trip_series, check_dtypes=True, check_names=False)
+
+    # empty ChunkedArray via C stream interface
+    empty_chunked_array = pa.chunked_array([], type=pyarrow_chunked_array.type)
+    round_trip_series = pl.Series(PyCapsuleStreamHolder(empty_chunked_array))
+    assert df["bools"].dtype == round_trip_series.dtype
+
+    # Table via C stream interface
+    round_trip_df = pl.DataFrame(PyCapsuleStreamHolder(pyarrow_table))
+    assert df.equals(round_trip_df)
+
+    # empty Table via C stream interface
+    empty_df = df[:0].to_arrow()
+    round_trip_df = pl.DataFrame(PyCapsuleStreamHolder(empty_df))
+    orig_schema = df.schema
+    round_trip_schema = round_trip_df.schema
+
+    # The "enum" schema is not preserved because categories are lost via C data
+    # interface
+    orig_schema.pop("enum")
+    round_trip_schema.pop("enum")
+
+    assert orig_schema == round_trip_schema
+
+    # RecordBatchReader via C stream interface
+    pyarrow_reader = pa.RecordBatchReader.from_batches(
+        pyarrow_table.schema, pyarrow_table.to_batches()
+    )
+    round_trip_df = pl.DataFrame(PyCapsuleStreamHolder(pyarrow_reader))
+    assert df.equals(round_trip_df)
+
+
+@pytest.mark.parametrize(
+    "tz",
+    [
+        None,
+        ZoneInfo("Asia/Tokyo"),
+        ZoneInfo("Europe/Amsterdam"),
+        ZoneInfo("UTC"),
+        timezone.utc,
+    ],
+)
+def test_init_list_of_dicts_with_timezone(tz: Any) -> None:
+    dt = datetime(2023, 1, 1, 0, 0, 0, 0, tzinfo=tz)
+
+    df = pl.DataFrame([{"dt": dt}, {"dt": dt}])
+    expected = pl.DataFrame({"dt": [dt, dt]})
+    assert_frame_equal(df, expected)
+
+    assert df.schema == {"dt": pl.Datetime("us", time_zone=tz and "UTC")}

@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::{mem, ops};
 
-use ahash::AHashSet;
+use polars_utils::itertools::Itertools;
 use rayon::prelude::*;
 
 #[cfg(feature = "algorithm_group_by")]
@@ -20,6 +20,7 @@ pub mod explode;
 mod from;
 #[cfg(feature = "algorithm_group_by")]
 pub mod group_by;
+pub(crate) mod horizontal;
 #[cfg(any(feature = "rows", feature = "object"))]
 pub mod row;
 mod top_k;
@@ -188,7 +189,7 @@ impl DataFrame {
     /// Get the index of the column.
     fn check_name_to_idx(&self, name: &str) -> PolarsResult<usize> {
         self.get_column_index(name)
-            .ok_or_else(|| polars_err!(ColumnNotFound: "{}", name))
+            .ok_or_else(|| polars_err!(col_not_found = name))
     }
 
     fn check_already_present(&self, name: &str) -> PolarsResult<()> {
@@ -316,6 +317,25 @@ impl DataFrame {
     pub const fn empty() -> Self {
         // SAFETY: An empty dataframe cannot have length mismatches or duplicate names
         unsafe { DataFrame::new_no_checks(Vec::new()) }
+    }
+
+    /// Create an empty `DataFrame` with empty columns as per the `schema`.
+    pub fn empty_with_schema(schema: &Schema) -> Self {
+        let cols = schema
+            .iter()
+            .map(|(name, dtype)| Series::new_empty(name, dtype))
+            .collect();
+        unsafe { DataFrame::new_no_checks(cols) }
+    }
+
+    /// Create an empty `DataFrame` with empty columns as per the `schema`.
+    pub fn empty_with_arrow_schema(schema: &ArrowSchema) -> Self {
+        let cols = schema
+            .fields
+            .iter()
+            .map(|fld| Series::new_empty(fld.name.as_str(), &(fld.data_type().into())))
+            .collect();
+        unsafe { DataFrame::new_no_checks(cols) }
     }
 
     /// Removes the last `Series` from the `DataFrame` and returns it, or [`None`] if it is empty.
@@ -555,6 +575,11 @@ impl DataFrame {
         &mut self.columns
     }
 
+    /// Take ownership of the underlying columns vec.
+    pub fn take_columns(self) -> Vec<Series> {
+        self.columns
+    }
+
     /// Iterator over the columns as [`Series`].
     ///
     /// # Example
@@ -612,8 +637,8 @@ impl DataFrame {
             ShapeMismatch: "{} column names provided for a DataFrame of width {}",
             names.len(), self.width()
         );
-        let unique_names: AHashSet<&str, ahash::RandomState> =
-            AHashSet::from_iter(names.iter().map(|name| name.as_ref()));
+        let unique_names: PlHashSet<&str> =
+            PlHashSet::from_iter(names.iter().map(|name| name.as_ref()));
         polars_ensure!(
             unique_names.len() == self.width(),
             Duplicate: "duplicate column names found"
@@ -756,51 +781,6 @@ impl DataFrame {
     /// ```
     pub fn is_empty(&self) -> bool {
         self.height() == 0
-    }
-
-    /// Add columns horizontally.
-    ///
-    /// # Safety
-    /// The caller must ensure:
-    /// - the length of all [`Series`] is equal to the height of this [`DataFrame`]
-    /// - the columns names are unique
-    pub unsafe fn hstack_mut_unchecked(&mut self, columns: &[Series]) -> &mut Self {
-        self.columns.extend_from_slice(columns);
-        self
-    }
-
-    /// Add multiple [`Series`] to a [`DataFrame`].
-    /// The added `Series` are required to have the same length.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use polars_core::prelude::*;
-    /// fn stack(df: &mut DataFrame, columns: &[Series]) {
-    ///     df.hstack_mut(columns);
-    /// }
-    /// ```
-    pub fn hstack_mut(&mut self, columns: &[Series]) -> PolarsResult<&mut Self> {
-        let mut names = self
-            .columns
-            .iter()
-            .map(|c| c.name())
-            .collect::<PlHashSet<_>>();
-        // first loop check validity. We don't do this in a single pass otherwise
-        // this DataFrame is already modified when an error occurs.
-        for col in columns {
-            polars_ensure!(
-                col.len() == self.height() || self.is_empty(),
-                ShapeMismatch: "unable to hstack Series of length {} and DataFrame of height {}",
-                col.len(), self.height(),
-            );
-            polars_ensure!(
-                names.insert(col.name()),
-                Duplicate: "unable to hstack, column with name {:?} already exists", col.name(),
-            );
-        }
-        drop(names);
-        Ok(unsafe { self.hstack_mut_unchecked(columns) })
     }
 
     /// Add multiple [`Series`] to a [`DataFrame`].
@@ -951,8 +931,13 @@ impl DataFrame {
         Ok(self)
     }
 
-    /// Does not check if schema is correct
-    pub(crate) fn vstack_mut_unchecked(&mut self, other: &DataFrame) {
+    /// Concatenate a [`DataFrame`] to this [`DataFrame`]
+    ///
+    /// If many `vstack` operations are done, it is recommended to call [`DataFrame::align_chunks`].
+    ///
+    /// # Panics
+    /// Panics if the schema's don't match.
+    pub fn vstack_mut_unchecked(&mut self, other: &DataFrame) {
         self.columns
             .iter_mut()
             .zip(other.columns.iter())
@@ -1053,7 +1038,7 @@ impl DataFrame {
         };
 
         // fast path for no nulls in df
-        if iter.clone().all(|s| !s.has_validity()) {
+        if iter.clone().all(|s| !s.has_nulls()) {
             return Ok(self.clone());
         }
 
@@ -1103,6 +1088,9 @@ impl DataFrame {
 
     /// Drop columns that are in `names` without allocating a [`HashSet`](std::collections::HashSet).
     pub fn drop_many_amortized(&self, names: &PlHashSet<&str>) -> DataFrame {
+        if names.is_empty() {
+            return self.clone();
+        }
         let mut new_cols = Vec::with_capacity(self.columns.len().saturating_sub(names.len()));
         self.columns.iter().for_each(|s| {
             if !names.contains(&s.name()) {
@@ -1121,7 +1109,7 @@ impl DataFrame {
         series: Series,
     ) -> PolarsResult<&mut Self> {
         polars_ensure!(
-            series.len() == self.height(),
+            self.width() == 0 || series.len() == self.height(),
             ShapeMismatch: "unable to add a column of length {} to a DataFrame of height {}",
             series.len(), self.height(),
         );
@@ -1183,8 +1171,15 @@ impl DataFrame {
     /// # Safety
     /// The caller must ensure `column.len() == self.height()` .
     pub unsafe fn with_column_unchecked(&mut self, column: Series) -> &mut Self {
-        self.get_columns_mut().push(column);
-        self
+        #[cfg(debug_assertions)]
+        {
+            return self.with_column(column).unwrap();
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.get_columns_mut().push(column);
+            self
+        }
     }
 
     fn add_column_by_schema(&mut self, s: Series, schema: &Schema) -> PolarsResult<()> {
@@ -1383,7 +1378,7 @@ impl DataFrame {
     /// Get column index of a [`Series`] by name.
     pub fn try_get_column_index(&self, name: &str) -> PolarsResult<usize> {
         self.get_column_index(name)
-            .ok_or_else(|| polars_err!(ColumnNotFound: "{}", name))
+            .ok_or_else(|| polars_err!(col_not_found = name))
     }
 
     /// Select a single column by name.
@@ -1582,7 +1577,7 @@ impl DataFrame {
                 .map(|name| {
                     let idx = *name_to_idx
                         .get(name.as_str())
-                        .ok_or_else(|| polars_err!(ColumnNotFound: "{}", name))?;
+                        .ok_or_else(|| polars_err!(col_not_found = name))?;
                     Ok(self
                         .select_at_idx(idx)
                         .unwrap()
@@ -1610,7 +1605,7 @@ impl DataFrame {
                 .map(|name| {
                     let idx = *name_to_idx
                         .get(name.as_str())
-                        .ok_or_else(|| polars_err!(ColumnNotFound: "{}", name))?;
+                        .ok_or_else(|| polars_err!(col_not_found = name))?;
                     Ok(self.select_at_idx(idx).unwrap().clone())
                 })
                 .collect::<PolarsResult<Vec<_>>>()?
@@ -1718,14 +1713,15 @@ impl DataFrame {
     /// ```
     pub fn rename(&mut self, column: &str, name: &str) -> PolarsResult<&mut Self> {
         self.select_mut(column)
-            .ok_or_else(|| polars_err!(ColumnNotFound: "{}", column))
+            .ok_or_else(|| polars_err!(col_not_found = column))
             .map(|s| s.rename(name))?;
-        let unique_names: AHashSet<&str, ahash::RandomState> =
-            AHashSet::from_iter(self.columns.iter().map(|s| s.name()));
+        let unique_names: PlHashSet<&str> =
+            PlHashSet::from_iter(self.columns.iter().map(|s| s.name()));
         polars_ensure!(
             unique_names.len() == self.width(),
             Duplicate: "duplicate column names found"
         );
+        drop(unique_names);
         Ok(self)
     }
 
@@ -1750,11 +1746,13 @@ impl DataFrame {
         mut sort_options: SortMultipleOptions,
         slice: Option<(i64, usize)>,
     ) -> PolarsResult<Self> {
+        if by_column.is_empty() {
+            polars_bail!(ComputeError: "No columns selected for sorting");
+        }
         // note that the by_column argument also contains evaluated expression from
-        // polars-lazy that may not even be present in this dataframe.
-
-        // therefore when we try to set the first columns as sorted, we ignore the error
-        // as expressions are not present (they are renamed to _POLARS_SORT_COLUMN_i.
+        // polars-lazy that may not even be present in this dataframe. therefore
+        // when we try to set the first columns as sorted, we ignore the error as
+        // expressions are not present (they are renamed to _POLARS_SORT_COLUMN_i.
         let first_descending = sort_options.descending[0];
         let first_by_column = by_column[0].name().to_string();
 
@@ -2360,10 +2358,10 @@ impl DataFrame {
     /// This responsibility is left to the caller as we don't want to take mutable references here,
     /// but we also don't want to rechunk here, as this operation is costly and would benefit the caller
     /// as well.
-    pub fn iter_chunks(&self, pl_flavor: bool, parallel: bool) -> RecordBatchIter {
-        // If any of the columns is binview and we don't convert `pl_flavor` we allow parallelism
+    pub fn iter_chunks(&self, compat_level: CompatLevel, parallel: bool) -> RecordBatchIter {
+        // If any of the columns is binview and we don't convert `compat_level` we allow parallelism
         // as we must allocate arrow strings/binaries.
-        let parallel = if parallel && !pl_flavor {
+        let parallel = if parallel && compat_level.0 >= 1 {
             self.columns.len() > 1
                 && self
                     .columns
@@ -2377,7 +2375,7 @@ impl DataFrame {
             columns: &self.columns,
             idx: 0,
             n_chunks: self.n_chunks(),
-            pl_flavor,
+            compat_level,
             parallel,
         }
     }
@@ -2411,7 +2409,6 @@ impl DataFrame {
     #[must_use]
     pub fn shift(&self, periods: i64) -> Self {
         let col = self._apply_columns_par(&|s| s.shift(periods));
-
         unsafe { DataFrame::new_no_checks(col) }
     }
 
@@ -2828,7 +2825,7 @@ impl DataFrame {
     #[cfg(feature = "row_hash")]
     pub fn hash_rows(
         &mut self,
-        hasher_builder: Option<ahash::RandomState>,
+        hasher_builder: Option<PlRandomState>,
     ) -> PolarsResult<UInt64Chunked> {
         let dfs = split_df(self, POOL.current_num_threads(), false);
         let (cas, _) = _df_rows_to_hashes_threaded_vertical(&dfs, hasher_builder)?;
@@ -2836,7 +2833,7 @@ impl DataFrame {
         let mut iter = cas.into_iter();
         let mut acc_ca = iter.next().unwrap();
         for ca in iter {
-            acc_ca.append(&ca);
+            acc_ca.append(&ca)?;
         }
         Ok(acc_ca.rechunk())
     }
@@ -2916,6 +2913,9 @@ impl DataFrame {
         POOL.install(|| {
             match groups {
                 GroupsProxy::Idx(idx) => {
+                    // Rechunk as the gather may rechunk for every group #17562.
+                    let mut df = df.clone();
+                    df.as_single_chunk_par();
                     Ok(idx
                         .into_par_iter()
                         .map(|(_, group)| {
@@ -2971,8 +2971,8 @@ impl DataFrame {
         let mut count = 0;
         for s in &self.columns {
             if cols.contains(s.name()) {
-                let ca = s.struct_()?;
-                new_cols.extend_from_slice(ca.fields());
+                let ca = s.struct_()?.clone();
+                new_cols.extend_from_slice(&ca.fields_as_series());
                 count += 1;
             } else {
                 new_cols.push(s.clone())
@@ -2985,7 +2985,7 @@ impl DataFrame {
             for col in cols {
                 let _ = schema
                     .get(&col)
-                    .ok_or_else(|| polars_err!(ColumnNotFound: "{}", col))?;
+                    .ok_or_else(|| polars_err!(col_not_found = col))?;
             }
         }
         DataFrame::new(new_cols)
@@ -2996,7 +2996,7 @@ pub struct RecordBatchIter<'a> {
     columns: &'a Vec<Series>,
     idx: usize,
     n_chunks: usize,
-    pl_flavor: bool,
+    compat_level: CompatLevel,
     parallel: bool,
 }
 
@@ -3012,12 +3012,12 @@ impl<'a> Iterator for RecordBatchIter<'a> {
                 let iter = self
                     .columns
                     .par_iter()
-                    .map(|s| s.to_arrow(self.idx, self.pl_flavor));
+                    .map(|s| s.to_arrow(self.idx, self.compat_level));
                 POOL.install(|| iter.collect())
             } else {
                 self.columns
                     .iter()
-                    .map(|s| s.to_arrow(self.idx, self.pl_flavor))
+                    .map(|s| s.to_arrow(self.idx, self.compat_level))
                     .collect()
             };
             self.idx += 1;
@@ -3095,7 +3095,7 @@ mod test {
             "foo" => &[1, 2, 3, 4, 5]
         )
         .unwrap();
-        let mut iter = df.iter_chunks(true, false);
+        let mut iter = df.iter_chunks(CompatLevel::newest(), false);
         assert_eq!(5, iter.next().unwrap().len());
         assert!(iter.next().is_none());
     }

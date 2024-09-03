@@ -11,11 +11,12 @@ import pytest
 from hypothesis import given
 
 import polars as pl
+from polars._utils.various import parse_version
 from polars.testing import assert_frame_equal
 from polars.testing.parametric import dataframes
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 protocol_dtypes: list[PolarsDataType] = [
     pl.Int8,
@@ -277,8 +278,8 @@ def test_to_dataframe_pyarrow_boolean_midbyte_slice() -> None:
 
 
 @pytest.mark.skipif(
-    sys.version_info < (3, 9),
-    reason="Older versions of pandas do not implement the required conversions",
+    parse_version(pd.__version__) < (2, 2),
+    reason="Pandas versions < 2.2 do not implement the required conversions",
 )
 def test_from_dataframe_pandas_timestamp_ns() -> None:
     df = pl.Series("a", [datetime(2000, 1, 1)], dtype=pl.Datetime("ns")).to_frame()

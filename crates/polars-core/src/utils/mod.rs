@@ -731,6 +731,8 @@ where
 }
 
 /// This takes ownership of the DataFrame so that drop is called earlier.
+/// # Panics
+/// Panics if `dfs` is empty.
 pub fn accumulate_dataframes_vertical<I>(dfs: I) -> PolarsResult<DataFrame>
 where
     I: IntoIterator<Item = DataFrame>,
@@ -742,6 +744,7 @@ where
     for df in iter {
         acc_df.vstack_mut(&df)?;
     }
+
     Ok(acc_df)
 }
 
@@ -1173,12 +1176,12 @@ mod test {
     }
 
     #[test]
-    fn test_align_chunks() {
+    fn test_align_chunks() -> PolarsResult<()> {
         let a = Int32Chunked::new("", &[1, 2, 3, 4]);
         let mut b = Int32Chunked::new("", &[1]);
         let b2 = Int32Chunked::new("", &[2, 3, 4]);
 
-        b.append(&b2);
+        b.append(&b2)?;
         let (a, b) = align_chunks_binary(&a, &b);
         assert_eq!(
             a.chunk_lengths().collect::<Vec<_>>(),
@@ -1188,13 +1191,15 @@ mod test {
         let a = Int32Chunked::new("", &[1, 2, 3, 4]);
         let mut b = Int32Chunked::new("", &[1]);
         let b1 = b.clone();
-        b.append(&b1);
-        b.append(&b1);
-        b.append(&b1);
+        b.append(&b1)?;
+        b.append(&b1)?;
+        b.append(&b1)?;
         let (a, b) = align_chunks_binary(&a, &b);
         assert_eq!(
             a.chunk_lengths().collect::<Vec<_>>(),
             b.chunk_lengths().collect::<Vec<_>>()
         );
+
+        Ok(())
     }
 }

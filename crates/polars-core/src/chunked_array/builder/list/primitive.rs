@@ -39,7 +39,7 @@ where
     ) -> Self {
         let values = MutablePrimitiveArray::<T::Native>::with_capacity_from(
             values_capacity,
-            values_type.to_arrow(true),
+            values_type.to_arrow(CompatLevel::newest()),
         );
         let builder = LargePrimitiveBuilder::<T::Native>::new_with_capacity(values, capacity);
         let field = Field::new(name, DataType::List(Box::new(logical_type)));
@@ -119,7 +119,7 @@ where
         let values = self.builder.mut_values();
 
         ca.downcast_iter().for_each(|arr| {
-            if !arr.has_validity() {
+            if arr.null_count() == 0 {
                 values.extend_from_slice(arr.values().as_slice())
             } else {
                 // SAFETY:

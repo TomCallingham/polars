@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use polars_core::config::verbose;
 use polars_core::prelude::*;
@@ -24,6 +25,10 @@ impl PhysicalIoExpr for Wrap {
             has_window_function: false,
         };
         h.evaluate_io(df)
+    }
+    fn live_variables(&self) -> Option<Vec<Arc<str>>> {
+        // @TODO: This should not unwrap
+        Some(expr_to_leaf_column_names(self.0.as_expression()?))
     }
     fn as_stats_evaluator(&self) -> Option<&dyn StatsEvaluator> {
         self.0.as_stats_evaluator()
@@ -245,16 +250,15 @@ fn get_pipeline_node(
     });
 
     IR::MapFunction {
-        function: FunctionNode::Pipeline {
-            function: Arc::new(move |_df: DataFrame| {
-                let mut state = ExecutionState::new();
+        function: FunctionIR::Pipeline {
+            function: Arc::new(Mutex::new(move |_df: DataFrame| {
+                let state = ExecutionState::new();
                 if state.verbose() {
                     eprintln!("RUN STREAMING PIPELINE");
                     eprintln!("{:?}", &pipelines)
                 }
-                state.set_in_streaming_engine();
                 execute_pipeline(state, std::mem::take(&mut pipelines))
-            }),
+            })),
             schema,
             original: original_lp.map(Arc::new),
         },

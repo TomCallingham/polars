@@ -27,7 +27,7 @@ with contextlib.suppress(ImportError):
 
 if TYPE_CHECKING:
     from polars import DataFrame, DataType, LazyFrame
-    from polars.type_aliases import ParallelStrategy, SchemaDict
+    from polars._typing import ParallelStrategy, SchemaDict
 
 
 @deprecate_renamed_parameter("row_count_name", "row_index_name", version="0.20.4")
@@ -44,10 +44,11 @@ def read_parquet(
     hive_partitioning: bool | None = None,
     glob: bool = True,
     hive_schema: SchemaDict | None = None,
+    try_parse_hive_dates: bool = True,
     rechunk: bool = False,
     low_memory: bool = False,
     storage_options: dict[str, Any] | None = None,
-    retries: int = 0,
+    retries: int = 2,
     use_pyarrow: bool = False,
     pyarrow_options: dict[str, Any] | None = None,
     memory_map: bool = True,
@@ -58,10 +59,14 @@ def read_parquet(
     Parameters
     ----------
     source
-        Path to a file or a file-like object (by "file-like object" we refer to objects
+        Path(s) to a file or directory
+        When needing to authenticate for scanning cloud locations, see the
+        `storage_options` parameter.
+
+        File-like objects are supported (by "file-like object" we refer to objects
         that have a `read()` method, such as a file handler like the builtin `open`
-        function, or a `BytesIO` instance). If the path is a directory, files in that
-        directory will all be read.
+        function, or a `BytesIO` instance) For file-like objects, stream position
+        may not be updated accordingly after reading.
     columns
         Columns to select. Accepts a list of column indices (starting at zero) or a list
         of column names.
@@ -94,6 +99,8 @@ def read_parquet(
         .. warning::
             This functionality is considered **unstable**. It may be changed
             at any point without it being considered a breaking change.
+    try_parse_hive_dates
+        Whether to try parsing hive values as date/datetime types.
     rechunk
         Make sure that all columns are contiguous in memory by
         aggregating the chunks into a single array.
@@ -101,8 +108,6 @@ def read_parquet(
         Reduce memory pressure at the expense of performance.
     storage_options
         Options that indicate how to connect to a cloud provider.
-        If the cloud provider is not supported by Polars, the storage options
-        are passed to `fsspec.open()`.
 
         The cloud providers currently supported are AWS, GCP, and Azure.
         See supported keys here:
@@ -110,6 +115,8 @@ def read_parquet(
         * `aws <https://docs.rs/object_store/latest/object_store/aws/enum.AmazonS3ConfigKey.html>`_
         * `gcp <https://docs.rs/object_store/latest/object_store/gcp/enum.GoogleConfigKey.html>`_
         * `azure <https://docs.rs/object_store/latest/object_store/azure/enum.AzureConfigKey.html>`_
+        * Hugging Face (`hf://`): Accepts an API key under the `token` parameter: \
+          `{'token': '...'}`, or by setting the `HF_TOKEN` environment variable.
 
         If `storage_options` is not provided, Polars will try to infer the information
         from environment variables.
@@ -182,12 +189,14 @@ def read_parquet(
         use_statistics=use_statistics,
         hive_partitioning=hive_partitioning,
         hive_schema=hive_schema,
+        try_parse_hive_dates=try_parse_hive_dates,
         rechunk=rechunk,
         low_memory=low_memory,
         cache=False,
         storage_options=storage_options,
         retries=retries,
         glob=glob,
+        include_file_paths=None,
     )
 
     if columns is not None:
@@ -269,6 +278,8 @@ def read_parquet_schema(source: str | Path | IO[bytes] | bytes) -> dict[str, Dat
         Path to a file or a file-like object (by "file-like object" we refer to objects
         that have a `read()` method, such as a file handler like the builtin `open`
         function, or a `BytesIO` instance).
+        For file-like objects,
+        stream position may not be updated accordingly after reading.
 
     Returns
     -------
@@ -294,11 +305,13 @@ def scan_parquet(
     hive_partitioning: bool | None = None,
     glob: bool = True,
     hive_schema: SchemaDict | None = None,
+    try_parse_hive_dates: bool = True,
     rechunk: bool = False,
     low_memory: bool = False,
     cache: bool = True,
     storage_options: dict[str, Any] | None = None,
-    retries: int = 0,
+    retries: int = 2,
+    include_file_paths: str | None = None,
 ) -> LazyFrame:
     """
     Lazily read from a local or cloud-hosted parquet file (or files).
@@ -309,8 +322,9 @@ def scan_parquet(
     Parameters
     ----------
     source
-        Path(s) to a file
-        If a single path is given, it can be a globbing pattern.
+        Path(s) to a file or directory
+        When needing to authenticate for scanning cloud locations, see the
+        `storage_options` parameter.
     n_rows
         Stop reading from parquet file after reading `n_rows`.
     row_index_name
@@ -318,9 +332,25 @@ def scan_parquet(
         DataFrame
     row_index_offset
         Offset to start the row index column (only used if the name is set)
-    parallel : {'auto', 'columns', 'row_groups', 'none'}
-        This determines the direction of parallelism. 'auto' will try to determine the
-        optimal direction.
+    parallel : {'auto', 'columns', 'row_groups', 'prefiltered', 'none'}
+        This determines the direction and strategy of parallelism. 'auto' will
+        try to determine the optimal direction.
+
+        The `prefiltered` strategy first evaluates the pushed-down predicates in
+        parallel and determines a mask of which rows to read. Then, it
+        parallelizes over both the columns and the row groups while filtering
+        out rows that do not need to be read. This can provide significant
+        speedups for large files (i.e. many row-groups) with a predicate that
+        filters clustered rows or filters heavily. In other cases,
+        `prefiltered` may slow down the scan compared other strategies.
+
+        The `prefiltered` settings falls back to `auto` if no predicate is
+        given.
+
+        .. warning::
+            The `prefiltered` strategy is considered **unstable**. It may be
+            changed at any point without it being considered a breaking change.
+
     use_statistics
         Use statistics in the parquet to determine if pages
         can be skipped from reading.
@@ -336,6 +366,8 @@ def scan_parquet(
         .. warning::
             This functionality is considered **unstable**. It may be changed
             at any point without it being considered a breaking change.
+    try_parse_hive_dates
+        Whether to try parsing hive values as date/datetime types.
     rechunk
         In case of reading multiple files via a glob pattern rechunk the final DataFrame
         into contiguous memory chunks.
@@ -352,11 +384,15 @@ def scan_parquet(
         * `aws <https://docs.rs/object_store/latest/object_store/aws/enum.AmazonS3ConfigKey.html>`_
         * `gcp <https://docs.rs/object_store/latest/object_store/gcp/enum.GoogleConfigKey.html>`_
         * `azure <https://docs.rs/object_store/latest/object_store/azure/enum.AzureConfigKey.html>`_
+        * Hugging Face (`hf://`): Accepts an API key under the `token` parameter: \
+          `{'token': '...'}`, or by setting the `HF_TOKEN` environment variable.
 
         If `storage_options` is not provided, Polars will try to infer the information
         from environment variables.
     retries
         Number of retries if accessing a cloud instance fails.
+    include_file_paths
+        Include the path of the source file(s) as a column with this name.
 
     See Also
     --------
@@ -404,8 +440,10 @@ def scan_parquet(
         use_statistics=use_statistics,
         hive_partitioning=hive_partitioning,
         hive_schema=hive_schema,
+        try_parse_hive_dates=try_parse_hive_dates,
         retries=retries,
         glob=glob,
+        include_file_paths=include_file_paths,
     )
 
 
@@ -424,7 +462,9 @@ def _scan_parquet_impl(
     hive_partitioning: bool | None = None,
     glob: bool = True,
     hive_schema: SchemaDict | None = None,
-    retries: int = 0,
+    try_parse_hive_dates: bool = True,
+    retries: int = 2,
+    include_file_paths: str | None = None,
 ) -> LazyFrame:
     if isinstance(source, list):
         sources = source
@@ -451,7 +491,9 @@ def _scan_parquet_impl(
         use_statistics=use_statistics,
         hive_partitioning=hive_partitioning,
         hive_schema=hive_schema,
+        try_parse_hive_dates=try_parse_hive_dates,
         retries=retries,
         glob=glob,
+        include_file_paths=include_file_paths,
     )
     return wrap_ldf(pylf)

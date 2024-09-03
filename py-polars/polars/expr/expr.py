@@ -46,11 +46,7 @@ from polars._utils.various import (
     sphinx_accessor,
     warn_null_comparison,
 )
-from polars.datatypes import (
-    Int64,
-    is_polars_dtype,
-    py_type_to_dtype,
-)
+from polars.datatypes import Int64, is_polars_dtype, parse_into_dtype
 from polars.dependencies import _check_for_numpy
 from polars.dependencies import numpy as np
 from polars.exceptions import CustomUFuncWarning, PolarsInefficientMapWarning
@@ -76,10 +72,7 @@ if TYPE_CHECKING:
     from io import IOBase
 
     from polars import DataFrame, LazyFrame, Series
-    from polars._utils.various import (
-        NoDefault,
-    )
-    from polars.type_aliases import (
+    from polars._typing import (
         ClosedInterval,
         FillNullStrategy,
         InterpolationMethod,
@@ -92,8 +85,12 @@ if TYPE_CHECKING:
         RankMethod,
         RollingInterpolationMethod,
         SearchSortedSide,
+        SerializationFormat,
         TemporalLiteral,
         WindowMappingStrategy,
+    )
+    from polars._utils.various import (
+        NoDefault,
     )
 
     if sys.version_info >= (3, 11):
@@ -295,20 +292,33 @@ class Expr:
         is_custom_ufunc = getattr(ufunc, "signature") is not None  # noqa: B009
         num_expr = sum(isinstance(inp, Expr) for inp in inputs)
         exprs = [
-            (inp, Expr, i) if isinstance(inp, Expr) else (inp, None, i)
+            (inp, True, i) if isinstance(inp, Expr) else (inp, False, i)
             for i, inp in enumerate(inputs)
         ]
+
         if num_expr == 1:
-            root_expr = next(expr[0] for expr in exprs if expr[1] == Expr)
+            root_expr = next(expr[0] for expr in exprs if expr[1])
         else:
-            root_expr = F.struct(expr[0] for expr in exprs if expr[1] == Expr)
+            # We rename all but the first expression in case someone did e.g.
+            # np.divide(pl.col("a"), pl.col("a")); we'll be creating a struct
+            # below, and structs can't have duplicate names.
+            first_renameable_expr = True
+            actual_exprs = []
+            for inp, is_actual_expr, index in exprs:
+                if is_actual_expr:
+                    if first_renameable_expr:
+                        first_renameable_expr = False
+                    else:
+                        inp = inp.alias(f"argument_{index}")
+                    actual_exprs.append(inp)
+            root_expr = F.struct(actual_exprs)
 
         def function(s: Series) -> Series:  # pragma: no cover
             args = []
             for i, expr in enumerate(exprs):
-                if expr[1] == Expr and num_expr > 1:
+                if expr[1] and num_expr > 1:
                     args.append(s.struct[i])
-                elif expr[1] == Expr:
+                elif expr[1]:
                     args.append(s)
                 else:
                     args.append(expr[0])
@@ -326,13 +336,16 @@ class Expr:
                 CustomUFuncWarning,
                 stacklevel=find_stacklevel(),
             )
-            return root_expr.map_batches(
-                function, is_elementwise=False
-            ).meta.undo_aliases()
-        return root_expr.map_batches(function, is_elementwise=True).meta.undo_aliases()
+            return root_expr.map_batches(function, is_elementwise=False)
+        return root_expr.map_batches(function, is_elementwise=True)
 
     @classmethod
-    def deserialize(cls, source: str | Path | IOBase) -> Expr:
+    def deserialize(
+        cls,
+        source: str | Path | IOBase | bytes,
+        *,
+        format: SerializationFormat = "binary",
+    ) -> Expr:
         """
         Read a serialized expression from a file.
 
@@ -342,10 +355,15 @@ class Expr:
             Path to a file or a file-like object (by file-like object, we refer to
             objects that have a `read()` method, such as a file handler (e.g.
             via builtin `open` function) or `BytesIO`).
+        format
+            The format with which the Expr was serialized. Options:
+
+            - `"binary"`: Deserialize from binary format (bytes). This is the default.
+            - `"json"`: Deserialize from JSON format (string).
 
         Warnings
         --------
-        This function uses :mod:`pickle` when the logical plan contains Python UDFs,
+        This function uses :mod:`pickle` if the logical plan contains Python UDFs,
         and as such inherits the security implications. Deserializing can execute
         arbitrary code, so it should only be attempted on trusted data.
 
@@ -353,22 +371,35 @@ class Expr:
         --------
         Expr.meta.serialize
 
+        Notes
+        -----
+        Serialization is not stable across Polars versions: a LazyFrame serialized
+        in one Polars version may not be deserializable in another Polars version.
+
         Examples
         --------
-        >>> from io import StringIO
+        >>> import io
         >>> expr = pl.col("foo").sum().over("bar")
-        >>> json = expr.meta.serialize()
-        >>> pl.Expr.deserialize(StringIO(json))  # doctest: +ELLIPSIS
+        >>> bytes = expr.meta.serialize()
+        >>> pl.Expr.deserialize(io.BytesIO(bytes))  # doctest: +ELLIPSIS
         <Expr ['col("foo").sum().over([col("ba…'] at ...>
         """
         if isinstance(source, StringIO):
             source = BytesIO(source.getvalue().encode())
         elif isinstance(source, (str, Path)):
             source = normalize_filepath(source)
+        elif isinstance(source, bytes):
+            source = BytesIO(source)
 
-        expr = cls.__new__(cls)
-        expr._pyexpr = PyExpr.deserialize(source)
-        return expr
+        if format == "binary":
+            deserializer = PyExpr.deserialize_binary
+        elif format == "json":
+            deserializer = PyExpr.deserialize_json
+        else:
+            msg = f"`format` must be one of {{'binary', 'json'}}, got {format!r}"
+            raise ValueError(msg)
+
+        return cls._from_pyexpr(deserializer(source))
 
     def to_physical(self) -> Expr:
         """
@@ -650,9 +681,9 @@ class Expr:
 
         See Also
         --------
-        map
-        prefix
-        suffix
+        name.map
+        name.prefix
+        name.suffix
 
         Examples
         --------
@@ -1748,7 +1779,7 @@ class Expr:
         │ 3.0 ┆ 6   │
         └─────┴─────┘
         """
-        dtype = py_type_to_dtype(dtype)
+        dtype = parse_into_dtype(dtype)
         return self._from_pyexpr(self._pyexpr.cast(dtype, strict, wrap_numerical))
 
     def sort(self, *, descending: bool = False, nulls_last: bool = False) -> Expr:
@@ -2463,7 +2494,7 @@ class Expr:
         )
 
     def gather(
-        self, indices: int | Sequence[int] | Expr | Series | np.ndarray[Any, Any]
+        self, indices: int | Sequence[int] | IntoExpr | Series | np.ndarray[Any, Any]
     ) -> Expr:
         """
         Take values by index.
@@ -2510,8 +2541,10 @@ class Expr:
         │ two   ┆ [4, 99]   │
         └───────┴───────────┘
         """
-        if isinstance(indices, Sequence) or (
-            _check_for_numpy(indices) and isinstance(indices, np.ndarray)
+        if (
+            isinstance(indices, Sequence)
+            and not isinstance(indices, str)
+            or (_check_for_numpy(indices) and isinstance(indices, np.ndarray))
         ):
             indices_lit = F.lit(pl.Series("", indices, dtype=Int64))._pyexpr
         else:
@@ -3329,7 +3362,7 @@ class Expr:
 
         Examples
         --------
-        >>> df = pl.DataFrame({"a": [1, 1, 2]})
+        >>> df = pl.DataFrame({"a": [1, 3, 2]})
         >>> df.select(pl.col("a").last())
         shape: (1, 1)
         ┌─────┐
@@ -4259,9 +4292,6 @@ class Expr:
         A reasonable use case for `map` functions is transforming the values
         represented by an expression using a third-party library.
 
-        If your function returns a scalar, for example a float, use
-        :func:`map_to_scalar` instead.
-
         Parameters
         ----------
         function
@@ -4270,14 +4300,14 @@ class Expr:
             Dtype of the output Series.
             If not set, the dtype will be inferred based on the first non-null value
             that is returned by the function.
-        is_elementwise
-            If set to true this can run in the streaming engine, but may yield
-            incorrect results in group-by. Ensure you know what you are doing!
         agg_list
             Aggregate the values of the expression into a list before applying the
             function. This parameter only works in a group-by context.
             The function will be invoked only once on a list of groups, rather than
             once per group.
+        is_elementwise
+            If set to true this can run in the streaming engine, but may yield
+            incorrect results in group-by. Ensure you know what you are doing!
         returns_scalar
             If the function returns a scalar, by default it will be wrapped in
             a list in the output, since the assumption is that the function
@@ -4376,9 +4406,35 @@ class Expr:
         │ 0   ┆ 3   │
         └─────┴─────┘
 
+        Call a function that takes multiple arguments by creating a `struct` and
+        referencing its fields inside the function call.
+
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [5, 1, 0, 3],
+        ...         "b": [4, 2, 3, 4],
+        ...     }
+        ... )
+        >>> df.with_columns(
+        ...     a_times_b=pl.struct("a", "b").map_batches(
+        ...         lambda x: np.multiply(x.struct.field("a"), x.struct.field("b"))
+        ...     )
+        ... )
+        shape: (4, 3)
+        ┌─────┬─────┬───────────┐
+        │ a   ┆ b   ┆ a_times_b │
+        │ --- ┆ --- ┆ ---       │
+        │ i64 ┆ i64 ┆ i64       │
+        ╞═════╪═════╪═══════════╡
+        │ 5   ┆ 4   ┆ 20        │
+        │ 1   ┆ 2   ┆ 2         │
+        │ 0   ┆ 3   ┆ 0         │
+        │ 3   ┆ 4   ┆ 12        │
+        └─────┴─────┴───────────┘
+
         """
         if return_dtype is not None:
-            return_dtype = py_type_to_dtype(return_dtype)
+            return_dtype = parse_into_dtype(return_dtype)
 
         return self._from_pyexpr(
             self._pyexpr.map_batches(
@@ -4398,6 +4454,7 @@ class Expr:
         skip_nulls: bool = True,
         pass_name: bool = False,
         strategy: MapElementsStrategy = "thread_local",
+        returns_scalar: bool = False,
     ) -> Expr:
         """
         Map a custom/user-defined function (UDF) to each element of a column.
@@ -4444,6 +4501,10 @@ class Expr:
             Don't map the function over values that contain nulls (this is faster).
         pass_name
             Pass the Series name to the custom function (this is more expensive).
+        returns_scalar
+            If the function passed does a reduction
+            (e.g. sum, min, etc), Polars must be informed of this otherwise
+            the schema might be incorrect.
         strategy : {'thread_local', 'threading'}
             The threading strategy to use.
 
@@ -4622,14 +4683,22 @@ class Expr:
                     )
 
         if strategy == "thread_local":
-            return self.map_batches(wrap_f, agg_list=True, return_dtype=return_dtype)
+            return self.map_batches(
+                wrap_f,
+                agg_list=True,
+                return_dtype=return_dtype,
+                returns_scalar=returns_scalar,
+            )
         elif strategy == "threading":
 
             def wrap_threading(x: Series) -> Series:
                 def get_lazy_promise(df: DataFrame) -> LazyFrame:
                     return df.lazy().select(
                         F.col("x").map_batches(
-                            wrap_f, agg_list=True, return_dtype=return_dtype
+                            wrap_f,
+                            agg_list=True,
+                            return_dtype=return_dtype,
+                            returns_scalar=returns_scalar,
                         )
                     )
 
@@ -4663,7 +4732,10 @@ class Expr:
                 return F.concat(out, rechunk=False)
 
             return self.map_batches(
-                wrap_threading, agg_list=True, return_dtype=return_dtype
+                wrap_threading,
+                agg_list=True,
+                return_dtype=return_dtype,
+                returns_scalar=returns_scalar,
             )
         else:
             msg = f"strategy {strategy!r} is not supported"
@@ -4673,7 +4745,7 @@ class Expr:
         """
         Flatten a list or string column.
 
-        Alias for :func:`polars.expr.list.ExprListNameSpace.explode`.
+        Alias for :func:`Expr.list.explode`.
 
         Examples
         --------
@@ -4813,7 +4885,7 @@ class Expr:
         Examples
         --------
         >>> df = pl.DataFrame({"foo": [1, 2, 3, 4, 5, 6, 7]})
-        >>> df.head(3)
+        >>> df.select(pl.col("foo").head(3))
         shape: (3, 1)
         ┌─────┐
         │ foo │
@@ -4839,7 +4911,7 @@ class Expr:
         Examples
         --------
         >>> df = pl.DataFrame({"foo": [1, 2, 3, 4, 5, 6, 7]})
-        >>> df.tail(3)
+        >>> df.select(pl.col("foo").tail(3))
         shape: (3, 1)
         ┌─────┐
         │ foo │
@@ -4870,7 +4942,7 @@ class Expr:
         Examples
         --------
         >>> df = pl.DataFrame({"foo": [1, 2, 3, 4, 5, 6, 7]})
-        >>> df.limit(3)
+        >>> df.select(pl.col("foo").limit(3))
         shape: (3, 1)
         ┌─────┐
         │ foo │
@@ -8506,7 +8578,7 @@ class Expr:
 
         is the biased sample :math:`i\texttt{th}` central moment, and
         :math:`\bar{x}` is
-        the sample mean.  If `bias` is False, the calculations are
+        the sample mean. If `bias` is False, the calculations are
         corrected for bias and the value computed is the adjusted
         Fisher-Pearson standardized moment coefficient, i.e.
 
@@ -9141,6 +9213,9 @@ class Expr:
         """
         Shuffle the contents of this expression.
 
+        Note this is shuffled independently of any other column or Expression. If you
+        want each row to stay the same use df.sample(shuffle=True)
+
         Parameters
         ----------
         seed
@@ -9590,7 +9665,7 @@ class Expr:
         Parameters
         ----------
         value
-            A constant literal value or a unit expressioin with which to extend the
+            A constant literal value or a unit expression with which to extend the
             expression result Series; can pass None to extend with nulls.
         n
             The number of additional values that will be added.
@@ -9640,8 +9715,8 @@ class Expr:
                 as the computation is already parallelized per group.
         name
             Give the resulting count column a specific name;
-            if `normalize` is True defaults to "count",
-            otherwise defaults to "proportion".
+            if `normalize` is True defaults to "proportion",
+            otherwise defaults to "count".
         normalize
             If true gives relative frequencies of the unique values
 
@@ -10483,7 +10558,7 @@ class Expr:
             " Enclose your input in `io.StringIO` to keep the same behavior.",
             version="0.20.11",
         )
-        return cls.deserialize(StringIO(value))
+        return cls.deserialize(StringIO(value), format="json")
 
     @property
     def bin(self) -> ExprBinaryNameSpace:

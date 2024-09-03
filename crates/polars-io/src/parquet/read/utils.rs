@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use polars_core::prelude::{ArrowSchema, DataFrame, Series, IDX_DTYPE};
 
-use super::read_impl::materialize_hive_partitions;
+use crate::hive::materialize_hive_partitions;
 use crate::utils::apply_projection;
 use crate::RowIndex;
 
@@ -17,14 +17,14 @@ pub fn materialize_empty_df(
     } else {
         Cow::Borrowed(reader_schema)
     };
-    let mut df = DataFrame::from(schema.as_ref());
+    let mut df = DataFrame::empty_with_arrow_schema(&schema);
 
     if let Some(row_index) = row_index {
         df.insert_column(0, Series::new_empty(&row_index.name, &IDX_DTYPE))
             .unwrap();
     }
 
-    materialize_hive_partitions(&mut df, hive_partition_columns, 0);
+    materialize_hive_partitions(&mut df, reader_schema, hive_partition_columns, 0);
 
     df
 }

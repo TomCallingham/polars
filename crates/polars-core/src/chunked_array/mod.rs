@@ -36,6 +36,8 @@ pub(crate) mod logical;
 pub mod object;
 #[cfg(feature = "random")]
 mod random;
+#[cfg(feature = "dtype-struct")]
+mod struct_;
 #[cfg(any(
     feature = "temporal",
     feature = "dtype-datetime",
@@ -50,6 +52,8 @@ use std::slice::Iter;
 
 use arrow::legacy::kernels::concatenate::concatenate_owned_unchecked;
 use arrow::legacy::prelude::*;
+#[cfg(feature = "dtype-struct")]
+pub use struct_::StructChunked;
 
 use self::metadata::{
     IMMetadata, Metadata, MetadataFlags, MetadataMerge, MetadataProperties, MetadataReadGuard,
@@ -71,8 +75,8 @@ pub type ChunkLenIter<'a> = std::iter::Map<std::slice::Iter<'a, ArrayRef>, fn(&A
 ///
 /// ```rust
 /// # use polars_core::prelude::*;
-/// fn apply_cosine_and_cast(ca: &Float32Chunked) -> Float64Chunked {
-///     ca.apply_values_generic(|v| v.cos() as f64)
+/// fn apply_cosine_and_cast(ca: &Float32Chunked) -> Float32Chunked {
+///     ca.apply_values(|v| v.cos())
 /// }
 /// ```
 ///
@@ -179,7 +183,7 @@ impl<T: PolarsDataType> ChunkedArray<T> {
     ///
     /// If you want to explicitly the `length` and `null_count`, look at
     /// [`ChunkedArray::new_with_dims`]
-    pub fn new_with_compute_len(field: Arc<Field>, chunks: Vec<ArrayRef>) -> Self {
+    fn new_with_compute_len(field: Arc<Field>, chunks: Vec<ArrayRef>) -> Self {
         unsafe {
             let mut chunked_arr = Self::new_with_dims(field, chunks, 0, 0);
             chunked_arr.compute_len();
@@ -188,10 +192,6 @@ impl<T: PolarsDataType> ChunkedArray<T> {
     }
 
     /// Create a new [`ChunkedArray`] and explicitly set its `length` and `null_count`.
-    ///
-    /// If you want to compute the `length` and `null_count`, look at
-    /// [`ChunkedArray::new_with_compute_len`]
-    ///
     /// # Safety
     /// The length and null_count must be correct.
     pub unsafe fn new_with_dims(
@@ -498,10 +498,9 @@ impl<T: PolarsDataType> ChunkedArray<T> {
     }
 
     #[inline]
-    /// Return if any the chunks in this [`ChunkedArray`] have a validity bitmap.
-    /// no bitmap means no null values.
-    pub fn has_validity(&self) -> bool {
-        self.iter_validities().any(|valid| valid.is_some())
+    /// Return if any the chunks in this [`ChunkedArray`] have nulls.
+    pub fn has_nulls(&self) -> bool {
+        self.null_count > 0
     }
 
     /// Shrink the capacity of this array to fit its length.
@@ -933,7 +932,11 @@ pub(crate) fn to_primitive<T: PolarsNumericType>(
     values: Vec<T::Native>,
     validity: Option<Bitmap>,
 ) -> PrimitiveArray<T::Native> {
-    PrimitiveArray::new(T::get_dtype().to_arrow(true), values.into(), validity)
+    PrimitiveArray::new(
+        T::get_dtype().to_arrow(CompatLevel::newest()),
+        values.into(),
+        validity,
+    )
 }
 
 pub(crate) fn to_array<T: PolarsNumericType>(
@@ -1050,7 +1053,7 @@ pub(crate) mod test {
     fn slice() {
         let mut first = UInt32Chunked::new("first", &[0, 1, 2]);
         let second = UInt32Chunked::new("second", &[3, 4, 5]);
-        first.append(&second);
+        first.append(&second).unwrap();
         assert_slice_equal(&first.slice(0, 3), &[0, 1, 2]);
         assert_slice_equal(&first.slice(0, 4), &[0, 1, 2, 3]);
         assert_slice_equal(&first.slice(1, 4), &[1, 2, 3, 4]);

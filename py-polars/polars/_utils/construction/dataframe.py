@@ -37,12 +37,14 @@ from polars._utils.wrap import wrap_df, wrap_s
 from polars.datatypes import (
     N_INFER_DEFAULT,
     Categorical,
+    Datetime,
     Enum,
     String,
     Struct,
     Unknown,
     is_polars_dtype,
-    py_type_to_dtype,
+    parse_into_dtype,
+    try_parse_into_dtype,
 )
 from polars.dependencies import (
     _NUMPY_AVAILABLE,
@@ -62,13 +64,13 @@ with contextlib.suppress(ImportError):  # Module not available when building doc
 
 if TYPE_CHECKING:
     from polars import DataFrame, Series
-    from polars.polars import PySeries
-    from polars.type_aliases import (
+    from polars._typing import (
         Orientation,
         PolarsDataType,
         SchemaDefinition,
         SchemaDict,
     )
+    from polars.polars import PySeries
 
 _MIN_NUMPY_SIZE_FOR_MULTITHREADING = 1000
 
@@ -124,9 +126,11 @@ def dict_to_pydf(
                         zip(
                             column_names,
                             pool.map(
-                                lambda t: pl.Series(t[0], t[1], nan_to_null=nan_to_null)
-                                if isinstance(t[1], np.ndarray)
-                                else t[1],
+                                lambda t: (
+                                    pl.Series(t[0], t[1], nan_to_null=nan_to_null)
+                                    if isinstance(t[1], np.ndarray)
+                                    else t[1]
+                                ),
                                 list(data.items()),
                             ),
                         )
@@ -192,7 +196,7 @@ def _unpack_schema(
         if is_polars_dtype(dtype, include_unknown=True):
             return dtype
         else:
-            return py_type_to_dtype(dtype)
+            return parse_into_dtype(dtype)
 
     def _parse_schema_overrides(
         schema_overrides: SchemaDict | None = None,
@@ -649,14 +653,14 @@ def _sequence_of_tuple_to_pydf(
     orient: Orientation | None,
     infer_schema_length: int | None,
 ) -> PyDataFrame:
-    # infer additional meta information if named tuple
+    # infer additional meta information if namedtuple
     if is_namedtuple(first_element.__class__):
         if schema is None:
             schema = first_element._fields  # type: ignore[attr-defined]
             annotations = getattr(first_element, "__annotations__", None)
             if annotations and len(annotations) == len(schema):
                 schema = [
-                    (name, py_type_to_dtype(tp, raise_unmatched=False))
+                    (name, try_parse_into_dtype(tp))
                     for name, tp in first_element.__annotations__.items()
                 ]
         if orient is None:
@@ -676,7 +680,7 @@ def _sequence_of_tuple_to_pydf(
 
 @_sequence_to_pydf_dispatcher.register(dict)
 def _sequence_of_dict_to_pydf(
-    first_element: Any,
+    first_element: dict[str, Any],
     data: Sequence[Any],
     schema: SchemaDefinition | None,
     *,
@@ -693,6 +697,20 @@ def _sequence_of_dict_to_pydf(
         if column_names
         else None
     )
+    tz_overrides = {
+        column_name: Datetime("us", time_zone="UTC")
+        for column_name, first_value in first_element.items()
+        if (
+            isinstance(first_value, datetime)
+            and hasattr(first_value, "tzinfo")
+            and first_value.tzinfo is not None
+            and column_name not in schema_overrides
+            and (schema is None or column_name not in schema)
+        )
+    }
+    if tz_overrides:
+        schema_overrides = {**schema_overrides, **tz_overrides}
+
     pydf = PyDataFrame.from_dicts(
         data,
         dicts_schema,
@@ -896,7 +914,7 @@ def _establish_dataclass_or_model_schema(
     else:
         column_names = []
         overrides = {
-            col: (py_type_to_dtype(tp, raise_unmatched=False) or Unknown)
+            col: (try_parse_into_dtype(tp) or Unknown)
             for col, tp in try_get_type_hints(first_element.__class__).items()
             if ((col in model_fields) if model_fields else (col != "__slots__"))
         }
@@ -930,9 +948,7 @@ def _include_unknowns(
 ) -> MutableMapping[str, PolarsDataType]:
     """Complete partial schema dict by including Unknown type."""
     return {
-        col: (
-            schema.get(col, Unknown) or Unknown  # type: ignore[truthy-bool]
-        )
+        col: (schema.get(col, Unknown) or Unknown)  # type: ignore[truthy-bool]
         for col in cols
     }
 
@@ -1028,6 +1044,30 @@ def iterable_to_pydf(
     return df._df
 
 
+def _check_pandas_columns(data: pd.DataFrame, *, include_index: bool) -> None:
+    """Check pandas dataframe columns can be converted to polars."""
+    stringified_cols: set[str] = {str(col) for col in data.columns}
+    stringified_index: set[str] = (
+        {str(idx) for idx in data.index.names} if include_index else set()
+    )
+
+    non_unique_cols: bool = len(stringified_cols) < len(data.columns)
+    non_unique_indices: bool = (
+        (len(stringified_index) < len(data.index.names)) if include_index else False
+    )
+    if non_unique_cols or non_unique_indices:
+        msg = (
+            "Pandas dataframe contains non-unique indices and/or column names. "
+            "Polars dataframes require unique string names for columns."
+        )
+        raise ValueError(msg)
+
+    overlapping_cols_and_indices: set[str] = stringified_cols & stringified_index
+    if len(overlapping_cols_and_indices) > 0:
+        msg = "Pandas indices and column names must not overlap."
+        raise ValueError(msg)
+
+
 def pandas_to_pydf(
     data: pd.DataFrame,
     schema: SchemaDefinition | None = None,
@@ -1039,6 +1079,8 @@ def pandas_to_pydf(
     include_index: bool = False,
 ) -> PyDataFrame:
     """Construct a PyDataFrame from a pandas DataFrame."""
+    _check_pandas_columns(data, include_index=include_index)
+
     convert_index = include_index and not _pandas_has_default_index(data)
     if not convert_index and all(
         is_simple_numpy_backed_pandas_series(data[col]) for col in data.columns
@@ -1145,7 +1187,11 @@ def arrow_to_pydf(
         if pa.types.is_dictionary(column.type):
             ps = plc.arrow_to_pyseries(name, column, rechunk=rechunk)
             dictionary_cols[i] = wrap_s(ps)
-        elif isinstance(column.type, pa.StructType) and column.num_chunks > 1:
+        elif (
+            isinstance(column.type, pa.StructType)
+            and hasattr(column, "num_chunks")
+            and column.num_chunks > 1
+        ):
             ps = plc.arrow_to_pyseries(name, column, rechunk=rechunk)
             struct_cols[i] = wrap_s(ps)
         else:

@@ -55,12 +55,16 @@ impl private::PrivateSeries for SeriesWrap<DurationChunked> {
             .map(|ca| ca.into_duration(self.0.time_unit()).into_series())
     }
 
-    fn vec_hash(&self, random_state: RandomState, buf: &mut Vec<u64>) -> PolarsResult<()> {
+    fn vec_hash(&self, random_state: PlRandomState, buf: &mut Vec<u64>) -> PolarsResult<()> {
         self.0.vec_hash(random_state, buf)?;
         Ok(())
     }
 
-    fn vec_hash_combine(&self, build_hasher: RandomState, hashes: &mut [u64]) -> PolarsResult<()> {
+    fn vec_hash_combine(
+        &self,
+        build_hasher: PlRandomState,
+        hashes: &mut [u64],
+    ) -> PolarsResult<()> {
         self.0.vec_hash_combine(build_hasher, hashes)?;
         Ok(())
     }
@@ -310,14 +314,14 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
     fn append(&mut self, other: &Series) -> PolarsResult<()> {
         polars_ensure!(self.0.dtype() == other.dtype(), append);
         let other = other.to_physical_repr().into_owned();
-        self.0.append(other.as_ref().as_ref());
+        self.0.append(other.as_ref().as_ref())?;
         Ok(())
     }
 
     fn extend(&mut self, other: &Series) -> PolarsResult<()> {
         polars_ensure!(self.0.dtype() == other.dtype(), extend);
         let other = other.to_physical_repr();
-        self.0.extend(other.as_ref().as_ref().as_ref());
+        self.0.extend(other.as_ref().as_ref().as_ref())?;
         Ok(())
     }
 
@@ -404,8 +408,8 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
         self.0.null_count()
     }
 
-    fn has_validity(&self) -> bool {
-        self.0.has_validity()
+    fn has_nulls(&self) -> bool {
+        self.0.has_nulls()
     }
 
     #[cfg(feature = "algorithm_group_by")]

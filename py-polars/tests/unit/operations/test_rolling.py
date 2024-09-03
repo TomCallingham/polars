@@ -10,7 +10,7 @@ from polars.exceptions import ComputeError, InvalidOperationError
 from polars.testing import assert_frame_equal, assert_series_equal
 
 if TYPE_CHECKING:
-    from polars.type_aliases import ClosedInterval, PolarsIntegerType
+    from polars._typing import ClosedInterval, PolarsIntegerType
 
 
 def test_rolling() -> None:
@@ -30,7 +30,7 @@ def test_rolling() -> None:
     )
 
     period: str | timedelta
-    for period in ("2d", timedelta(days=2)):  # type: ignore[assignment]
+    for period in ("2d", timedelta(days=2)):
         out = df.rolling(index_column="dt", period=period).agg(
             [
                 pl.sum("a").alias("sum_a"),

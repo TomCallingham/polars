@@ -143,7 +143,7 @@ pub(super) fn process_asof_join(
                 true
             } else {
                 let name = column_node_to_name(proj, expr_arena);
-                !local_projected_names.contains(&name)
+                !local_projected_names.contains(name)
             };
 
             process_projection(
@@ -181,7 +181,7 @@ pub(super) fn process_asof_join(
         expr_arena,
     )?;
 
-    Ok(resolve_join_suffixes(
+    resolve_join_suffixes(
         input_left,
         input_right,
         left_on,
@@ -190,7 +190,7 @@ pub(super) fn process_asof_join(
         lp_arena,
         expr_arena,
         &local_projection,
-    ))
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -327,7 +327,7 @@ pub(super) fn process_join(
                 true
             } else {
                 let name = column_node_to_name(proj, expr_arena);
-                !local_projected_names.contains(&name)
+                !local_projected_names.contains(name)
             };
 
             process_projection(
@@ -365,7 +365,7 @@ pub(super) fn process_join(
         expr_arena,
     )?;
 
-    Ok(resolve_join_suffixes(
+    resolve_join_suffixes(
         input_left,
         input_right,
         left_on,
@@ -374,7 +374,7 @@ pub(super) fn process_join(
         lp_arena,
         expr_arena,
         &local_projection,
-    ))
+    )
 }
 
 fn process_projection(
@@ -414,7 +414,7 @@ fn process_projection(
     // this branch tries to pushdown the column without suffix
     {
         // Column name of the projection without any alias.
-        let leaf_column_name = column_node_to_name(proj, expr_arena);
+        let leaf_column_name = column_node_to_name(proj, expr_arena).clone();
 
         let suffix = options.args.suffix();
         // If _right suffix exists we need to push a projection down without this
@@ -469,29 +469,36 @@ fn resolve_join_suffixes(
     lp_arena: &mut Arena<IR>,
     expr_arena: &mut Arena<AExpr>,
     local_projection: &[ColumnNode],
-) -> IR {
+) -> PolarsResult<IR> {
     let suffix = options.args.suffix();
     let alp = IRBuilder::new(input_left, expr_arena, lp_arena)
         .join(input_right, left_on, right_on, options.clone())
         .build();
     let schema_after_join = alp.schema(lp_arena);
 
+    let mut all_columns = true;
     let projections = local_projection
         .iter()
         .map(|proj| {
-            let name = column_node_to_name(*proj, expr_arena);
+            let name = column_node_to_name(*proj, expr_arena).clone();
             if name.ends_with(suffix) && schema_after_join.get(&name).is_none() {
                 let downstream_name = &name.as_ref()[..name.len() - suffix.len()];
                 let col = AExpr::Column(ColumnName::from(downstream_name));
                 let node = expr_arena.add(col);
-                ExprIR::new(node, OutputName::Alias(name))
+                all_columns = false;
+                ExprIR::new(node, OutputName::Alias(name.clone()))
             } else {
-                ExprIR::new(proj.0, OutputName::ColumnLhs(name))
+                ExprIR::new(proj.0, OutputName::ColumnLhs(name.clone()))
             }
         })
         .collect::<Vec<_>>();
 
-    IRBuilder::from_lp(alp, expr_arena, lp_arena)
-        .project(projections, Default::default())
-        .build()
+    let builder = IRBuilder::from_lp(alp, expr_arena, lp_arena);
+    Ok(if all_columns {
+        builder
+            .project_simple(projections.iter().map(|e| e.output_name()))?
+            .build()
+    } else {
+        builder.project(projections, Default::default()).build()
+    })
 }

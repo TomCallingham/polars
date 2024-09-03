@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from hypothesis.strategies import DrawFn, SearchStrategy
 
     from polars import LazyFrame
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 _ROW_LIMIT = 5  # max generated frame/series length
@@ -48,6 +48,10 @@ def series(  # noqa: D417
 ) -> Series:
     """
     Hypothesis strategy for producing Polars Series.
+
+    .. warning::
+        This functionality is currently considered **unstable**. It may be
+        changed at any point without it being considered a breaking change.
 
     Parameters
     ----------
@@ -284,6 +288,10 @@ def dataframes(  # noqa: D417
     """
     Hypothesis strategy for producing Polars DataFrames or LazyFrames.
 
+    .. warning::
+        This functionality is currently considered **unstable**. It may be
+        changed at any point without it being considered a breaking change.
+
     Parameters
     ----------
     cols : {int, columns}, optional
@@ -493,6 +501,10 @@ class column:
     """
     Define a column for use with the `dataframes` strategy.
 
+    .. warning::
+        This functionality is currently considered **unstable**. It may be
+        changed at any point without it being considered a breaking change.
+
     Parameters
     ----------
     name : str
@@ -555,7 +567,7 @@ def _handle_null_probability_deprecation(
     null_probability: float | Mapping[str, float],
 ) -> bool | dict[str, bool]:
     issue_deprecation_warning(
-        "`null_probability` is deprecated. Use `include_nulls` instead.",
+        "`null_probability` is deprecated. Use `allow_null` instead.",
         version="0.20.26",
     )
 

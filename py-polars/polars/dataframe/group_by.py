@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from polars import DataFrame
-    from polars.type_aliases import (
+    from polars._typing import (
         ClosedInterval,
         IntoExpr,
         Label,
@@ -65,13 +65,12 @@ class GroupBy:
         Allows iteration over the groups of the group by operation.
 
         Each group is represented by a tuple of `(name, data)`. The group names are
-        tuples of the distinct group values that identify each group. If a single string
-        was passed to `by`, the keys are a single value instead of a tuple.
+        tuples of the distinct group values that identify each group.
 
         Examples
         --------
         >>> df = pl.DataFrame({"foo": ["a", "a", "b"], "bar": [1, 2, 3]})
-        >>> for name, data in df.group_by(["foo"]):  # doctest: +SKIP
+        >>> for name, data in df.group_by("foo"):  # doctest: +SKIP
         ...     print(name)
         ...     print(data)
         (a,)
@@ -94,6 +93,8 @@ class GroupBy:
         │ b   ┆ 3   │
         └─────┴─────┘
         """
+        # Every group gather can trigger a rechunk, so do early.
+        self.df = self.df.rechunk()
         temp_col = "__POLARS_GB_GROUP_INDICES"
         groups_df = (
             self.df.lazy()
@@ -534,7 +535,7 @@ class GroupBy:
         >>> df = pl.DataFrame(
         ...     {
         ...         "a": [1, 2, 2, 3, 4, 5],
-        ...         "b": [0.5, 0.5, 4, 10, 13, 14],
+        ...         "b": [0.5, 0.5, 4, 10, 14, 13],
         ...         "c": [True, True, True, False, False, True],
         ...         "d": ["Apple", "Orange", "Apple", "Apple", "Banana", "Banana"],
         ...     }
@@ -548,7 +549,7 @@ class GroupBy:
         ╞════════╪═════╪══════╪═══════╡
         │ Apple  ┆ 3   ┆ 10.0 ┆ false │
         │ Orange ┆ 2   ┆ 0.5  ┆ true  │
-        │ Banana ┆ 5   ┆ 14.0 ┆ true  │
+        │ Banana ┆ 5   ┆ 13.0 ┆ true  │
         └────────┴─────┴──────┴───────┘
         """
         return self.agg(F.all().last())

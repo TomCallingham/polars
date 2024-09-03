@@ -5,7 +5,7 @@ from collections import OrderedDict
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 import pytest
 
@@ -17,7 +17,7 @@ from polars.testing import assert_frame_equal, assert_series_equal
 from tests.unit.conftest import FLOAT_DTYPES, NUMERIC_DTYPES
 
 if TYPE_CHECKING:
-    from polars.type_aliases import ExcelSpreadsheetEngine, SchemaDict, SelectorType
+    from polars._typing import ExcelSpreadsheetEngine, SelectorType
 
 pytestmark = pytest.mark.slow()
 
@@ -86,10 +86,8 @@ def path_ods_mixed(io_files_path: Path) -> Path:
     [
         # xls file
         (pl.read_excel, "path_xls", {"engine": "calamine"}),
-        (pl.read_excel, "path_xls", {"engine": None}),  # << autodetect
         # xlsx file
         (pl.read_excel, "path_xlsx", {"engine": "xlsx2csv"}),
-        (pl.read_excel, "path_xlsx", {"engine": None}),  # << autodetect
         (pl.read_excel, "path_xlsx", {"engine": "openpyxl"}),
         (pl.read_excel, "path_xlsx", {"engine": "calamine"}),
         # xlsb file (binary)
@@ -106,7 +104,7 @@ def test_read_spreadsheet(
 ) -> None:
     sheet_params: dict[str, Any]
 
-    for sheet_params in (  # type: ignore[assignment]
+    for sheet_params in (
         {"sheet_name": None, "sheet_id": None},
         {"sheet_name": "test1"},
         {"sheet_id": 1},
@@ -211,39 +209,35 @@ def test_read_excel_all_sheets(
 
 
 @pytest.mark.parametrize(
-    ("engine", "schema_overrides"),
-    [
-        ("xlsx2csv", {"datetime": pl.Datetime}),
-        ("calamine", None),
-        ("openpyxl", None),
-    ],
+    "engine",
+    ["xlsx2csv", "calamine", "openpyxl"],
 )
-def test_read_excel_basic_datatypes(
-    engine: ExcelSpreadsheetEngine,
-    schema_overrides: SchemaDict | None,
-) -> None:
+def test_read_excel_basic_datatypes(engine: ExcelSpreadsheetEngine) -> None:
     df = pl.DataFrame(
         {
             "A": [1, 2, 3, 4, 5],
             "fruits": ["banana", "banana", "apple", "apple", "banana"],
             "floats": [1.1, 1.2, 1.3, 1.4, 1.5],
             "datetime": [datetime(2023, 1, x) for x in range(1, 6)],
-            "nulls": [1, None, None, None, 1],
-        }
+            "nulls": [1, None, None, None, 0],
+        },
     )
     xls = BytesIO()
     df.write_excel(xls, position="C5")
 
-    # check if can be read as it was written
+    schema_overrides = {"datetime": pl.Datetime, "nulls": pl.Boolean}
+    df_compare = df.with_columns(
+        pl.col(nm).cast(tp) for nm, tp in schema_overrides.items()
+    )
     for sheet_id, sheet_name in ((None, None), (1, None), (None, "Sheet1")):
-        df = pl.read_excel(
+        df_from_excel = pl.read_excel(
             xls,
             sheet_id=sheet_id,
             sheet_name=sheet_name,
             engine=engine,
             schema_overrides=schema_overrides,
         )
-        assert_frame_equal(df, df)
+        assert_frame_equal(df_compare, df_from_excel)
 
     # check some additional overrides
     # (note: xlsx2csv can't currently convert datetime with trailing '00:00:00' to date)
@@ -392,6 +386,7 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
     df2 = pl.read_excel(
         path_xlsx,
         sheet_name="test4",
+        engine="xlsx2csv",
         read_options={"schema_overrides": {"cardinality": pl.UInt16}},
     ).drop_nulls()
 
@@ -402,6 +397,7 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
     df3 = pl.read_excel(
         path_xlsx,
         sheet_name="test4",
+        engine="xlsx2csv",
         schema_overrides={"cardinality": pl.UInt16},
         read_options={
             "schema_overrides": {
@@ -444,6 +440,7 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
         pl.read_excel(
             path_xlsx,
             sheet_name="test4",
+            engine="xlsx2csv",
             schema_overrides={"cardinality": pl.UInt16},
             read_options={"schema_overrides": {"cardinality": pl.Int32}},
         )
@@ -473,7 +470,7 @@ def test_schema_overrides(path_xlsx: Path, path_xlsb: Path, path_ods: Path) -> N
         ("calamine", "schema_sample_rows"),
     ],
 )
-def test_invalid_parameter_combinations(
+def test_invalid_parameter_combinations_infer_schema_len(
     path_xlsx: Path, engine: str, read_opts_param: str
 ) -> None:
     with pytest.raises(
@@ -486,6 +483,29 @@ def test_invalid_parameter_combinations(
             engine=engine,
             read_options={read_opts_param: 512},
             infer_schema_length=1024,
+        )
+
+
+@pytest.mark.parametrize(
+    ("engine", "read_opts_param"),
+    [
+        ("xlsx2csv", "columns"),
+        ("calamine", "use_columns"),
+    ],
+)
+def test_invalid_parameter_combinations_columns(
+    path_xlsx: Path, engine: str, read_opts_param: str
+) -> None:
+    with pytest.raises(
+        ParameterCollisionError,
+        match=f"cannot specify both `columns`.*{read_opts_param}",
+    ):
+        pl.read_excel(  # type: ignore[call-overload]
+            path_xlsx,
+            sheet_id=1,
+            engine=engine,
+            read_options={read_opts_param: ["B", "C", "D"]},
+            columns=["A", "B", "C"],
         )
 
 
@@ -525,7 +545,7 @@ def test_read_excel_all_sheets_with_sheet_name(path_xlsx: Path, engine: str) -> 
         # basic formatting
         {
             "autofit": True,
-            "table_style": "Table Style Light 16",
+            "table_style": "Table Style Dark 2",
             "column_totals": True,
             "float_precision": 0,
         },
@@ -623,21 +643,23 @@ def test_excel_round_trip(write_params: dict[str, Any]) -> None:
     )
 
     engine: ExcelSpreadsheetEngine
-    for engine in ("calamine", "xlsx2csv"):  # type: ignore[assignment]
-        read_options = (
-            {}
+    for engine in ("calamine", "xlsx2csv"):
+        read_options, has_header = (
+            ({}, True)
             if write_params.get("include_header", True)
             else (
-                {"has_header": False, "new_columns": ["dtm", "str", "val"]}
+                {"new_columns": ["dtm", "str", "val"]}
                 if engine == "xlsx2csv"
-                else {"header_row": None, "column_names": ["dtm", "str", "val"]}
+                else {"column_names": ["dtm", "str", "val"]},
+                False,
             )
         )
+
         fmt_strptime = "%Y-%m-%d"
         if write_params.get("dtype_formats", {}).get(pl.Date) == "dd-mm-yyyy":
             fmt_strptime = "%d-%m-%Y"
 
-        # write to an xlsx with polars, using various parameters...
+        # write to xlsx using various parameters...
         xls = BytesIO()
         _wb = df.write_excel(workbook=xls, worksheet="data", **write_params)
 
@@ -647,16 +669,51 @@ def test_excel_round_trip(write_params: dict[str, Any]) -> None:
             sheet_name="data",
             engine=engine,
             read_options=read_options,
+            has_header=has_header,
         )[:3].select(df.columns[:3])
+
         if engine == "xlsx2csv":
             xldf = xldf.with_columns(pl.col("dtm").str.strptime(pl.Date, fmt_strptime))
+
         assert_frame_equal(df, xldf)
 
 
+@pytest.mark.parametrize("engine", ["xlsx2csv", "calamine"])
+def test_excel_write_column_and_row_totals(engine: ExcelSpreadsheetEngine) -> None:
+    df = pl.DataFrame(
+        {
+            "id": ["aaa", "bbb", "ccc", "ddd", "eee"],
+            # float cols
+            "q1": [100.0, 55.5, -20.0, 0.5, 35.0],
+            "q2": [30.5, -10.25, 15.0, 60.0, 20.5],
+            # int cols
+            "q3": [-50, 0, 40, 80, 80],
+            "q4": [75, 55, 25, -10, -55],
+        }
+    )
+    for fn_sum in (True, "sum", "SUM"):
+        xls = BytesIO()
+        df.write_excel(
+            xls,
+            worksheet="misc",
+            sparklines={"trend": ["q1", "q2", "q3", "q4"]},
+            row_totals={
+                # add semiannual row total columns
+                "h1": ("q1", "q2"),
+                "h2": ("q3", "q4"),
+            },
+            column_totals=fn_sum,
+        )
+
+        # note that the totals are written as formulae, so we
+        # won't have the calculated values in the dataframe
+        xldf = pl.read_excel(xls, sheet_name="misc", engine=engine)
+        assert xldf.columns == ["id", "q1", "q2", "q3", "q4", "trend", "h1", "h2"]
+        assert xldf.row(-1) == (None, 0.0, 0.0, 0, 0, None, 0.0, 0)
+
+
 @pytest.mark.parametrize("engine", ["xlsx2csv", "openpyxl", "calamine"])
-def test_excel_compound_types(
-    engine: ExcelSpreadsheetEngine,
-) -> None:
+def test_excel_write_compound_types(engine: ExcelSpreadsheetEngine) -> None:
     df = pl.DataFrame(
         {"x": [[1, 2], [3, 4], [5, 6]], "y": ["a", "b", "c"], "z": [9, 8, 7]}
     ).select("x", pl.struct(["y", "z"]))
@@ -664,6 +721,7 @@ def test_excel_compound_types(
     xls = BytesIO()
     df.write_excel(xls, worksheet="data")
 
+    # expect string conversion (only scalar values are supported)
     xldf = pl.read_excel(xls, sheet_name="data", engine=engine)
     assert xldf.rows() == [
         ("[1, 2]", "{'y': 'a', 'z': 9}"),
@@ -673,7 +731,20 @@ def test_excel_compound_types(
 
 
 @pytest.mark.parametrize("engine", ["xlsx2csv", "openpyxl", "calamine"])
-def test_excel_sparklines(engine: ExcelSpreadsheetEngine) -> None:
+def test_excel_read_no_headers(engine: ExcelSpreadsheetEngine) -> None:
+    df = pl.DataFrame(
+        {"colx": [1, 2, 3], "coly": ["aaa", "bbb", "ccc"], "colz": [0.5, 0.0, -1.0]}
+    )
+    xls = BytesIO()
+    df.write_excel(xls, worksheet="data", include_header=False)
+
+    xldf = pl.read_excel(xls, engine=engine, has_header=False)
+    expected = xldf.rename({"column_1": "colx", "column_2": "coly", "column_3": "colz"})
+    assert_frame_equal(df, expected)
+
+
+@pytest.mark.parametrize("engine", ["xlsx2csv", "openpyxl", "calamine"])
+def test_excel_write_sparklines(engine: ExcelSpreadsheetEngine) -> None:
     from xlsxwriter import Workbook
 
     # note that we don't (quite) expect sparkline export to round-trip as we
@@ -726,6 +797,7 @@ def test_excel_sparklines(engine: ExcelSpreadsheetEngine) -> None:
     assert "Frame0" in tables
 
     with warnings.catch_warnings():
+        # ignore an openpyxl user warning about sparklines
         warnings.simplefilter("ignore", UserWarning)
         xldf = pl.read_excel(xls, sheet_name="frame_data", engine=engine)
 
@@ -753,21 +825,19 @@ def test_excel_sparklines(engine: ExcelSpreadsheetEngine) -> None:
 def test_excel_write_multiple_tables() -> None:
     from xlsxwriter import Workbook
 
-    # note: checks that empty tables don't error on write
-    df1 = pl.DataFrame(schema={"colx": pl.Date, "coly": pl.String, "colz": pl.Float64})
-    df2 = pl.DataFrame(schema={"colx": pl.Date, "coly": pl.String, "colz": pl.Float64})
-    df3 = pl.DataFrame(schema={"colx": pl.Date, "coly": pl.String, "colz": pl.Float64})
-    df4 = pl.DataFrame(schema={"colx": pl.Date, "coly": pl.String, "colz": pl.Float64})
+    # note: also checks that empty tables don't error on write
+    df = pl.DataFrame(schema={"colx": pl.Date, "coly": pl.String, "colz": pl.Float64})
 
+    # write multiple frames to multiple worksheets
     xls = BytesIO()
     with Workbook(xls) as wb:
-        df1.write_excel(workbook=wb, worksheet="sheet1", position="A1")
-        df2.write_excel(workbook=wb, worksheet="sheet1", position="A6")
-        df3.write_excel(workbook=wb, worksheet="sheet2", position="A1")
+        df.write_excel(workbook=wb, worksheet="sheet1", position="A1")
+        df.write_excel(workbook=wb, worksheet="sheet1", position="A6")
+        df.write_excel(workbook=wb, worksheet="sheet2", position="A1")
 
         # validate integration of externally-added formats
         fmt = wb.add_format({"bg_color": "#ffff00"})
-        df4.write_excel(
+        df.write_excel(
             workbook=wb,
             worksheet="sheet3",
             position="A1",
@@ -787,6 +857,34 @@ def test_excel_write_multiple_tables() -> None:
         )
     assert table_names == {f"Frame{n}" for n in range(4)}
     assert pl.read_excel(xls, sheet_name="sheet3").rows() == []
+
+
+def test_excel_write_worksheet_object() -> None:
+    # write to worksheet object
+    from xlsxwriter import Workbook
+
+    df = pl.DataFrame({"colx": ["aaa", "bbb", "ccc"], "coly": [-1234, 0, 5678]})
+
+    with Workbook(xls := BytesIO()) as wb:
+        ws = wb.add_worksheet("frame_data")
+        df.write_excel(wb, worksheet=ws)
+        ws.hide_zero()
+
+    assert_frame_equal(df, pl.read_excel(xls, sheet_name="frame_data"))
+
+    with pytest.raises(  # noqa: SIM117
+        ValueError,
+        match="the given workbook object .* is not the parent of worksheet 'frame_data'",
+    ):
+        with Workbook(BytesIO()) as wb:
+            df.write_excel(wb, worksheet=ws)
+
+    with pytest.raises(  # noqa: SIM117
+        TypeError,
+        match="worksheet object requires the parent workbook object; found workbook=None",
+    ):
+        with Workbook(BytesIO()) as wb:
+            df.write_excel(None, worksheet=ws)
 
 
 def test_excel_freeze_panes() -> None:
@@ -834,9 +932,9 @@ def test_excel_empty_sheet(
     with pytest.raises(NoDataError, match="empty Excel sheet"):
         read_spreadsheet(empty_spreadsheet_path)
 
-    engine_params = [{}] if ods else [{"engine": None}, {"engine": "calamine"}]
+    engine_params = [{}] if ods else [{"engine": "calamine"}]
     for params in engine_params:
-        df = read_spreadsheet(  # type: ignore[arg-type]
+        df = read_spreadsheet(
             empty_spreadsheet_path,
             sheet_name="no_data",
             raise_if_empty=False,
@@ -845,7 +943,7 @@ def test_excel_empty_sheet(
         expected = pl.DataFrame()
         assert_frame_equal(df, expected)
 
-        df = read_spreadsheet(  # type: ignore[arg-type]
+        df = read_spreadsheet(
             empty_spreadsheet_path,
             sheet_name="no_rows",
             raise_if_empty=False,
@@ -906,15 +1004,22 @@ def test_excel_type_inference_with_nulls(engine: ExcelSpreadsheetEngine) -> None
     xls = BytesIO()
     df.write_excel(xls)
 
-    read_df = pl.read_excel(
-        xls,
-        engine=engine,
-        schema_overrides={
-            "e": pl.Date,
-            "f": pl.Datetime("us"),
-        },
-    )
-    assert_frame_equal(df, read_df)
+    reversed_cols = list(reversed(df.columns))
+    read_cols: Sequence[str] | Sequence[int]
+    for read_cols in (
+        reversed_cols,
+        [5, 4, 3, 2, 1, 0],
+    ):
+        read_df = pl.read_excel(
+            xls,
+            engine=engine,
+            columns=read_cols,
+            schema_overrides={
+                "e": pl.Date,
+                "f": pl.Datetime("us"),
+            },
+        )
+        assert_frame_equal(df.select(reversed_cols), read_df)
 
 
 @pytest.mark.parametrize(

@@ -46,8 +46,6 @@ pub enum BitRepr {
 }
 
 pub(crate) mod private {
-    use ahash::RandomState;
-
     use super::*;
     use crate::chunked_array::metadata::MetadataFlags;
     use crate::chunked_array::ops::compare_inner::{TotalEqInner, TotalOrdInner};
@@ -101,12 +99,12 @@ pub(crate) mod private {
         fn into_total_ord_inner<'a>(&'a self) -> Box<dyn TotalOrdInner + 'a> {
             invalid_operation_panic!(into_total_ord_inner, self)
         }
-        fn vec_hash(&self, _build_hasher: RandomState, _buf: &mut Vec<u64>) -> PolarsResult<()> {
+        fn vec_hash(&self, _build_hasher: PlRandomState, _buf: &mut Vec<u64>) -> PolarsResult<()> {
             polars_bail!(opq = vec_hash, self._dtype());
         }
         fn vec_hash_combine(
             &self,
-            _build_hasher: RandomState,
+            _build_hasher: PlRandomState,
             _hashes: &mut [u64],
         ) -> PolarsResult<()> {
             polars_bail!(opq = vec_hash_combine, self._dtype());
@@ -231,7 +229,7 @@ pub trait SeriesTrait:
 
     /// Shrink the capacity of this array to fit its length.
     fn shrink_to_fit(&mut self) {
-        invalid_operation_panic!(shrink_to_fit, self);
+        // no-op
     }
 
     /// Take `num_elements` from the top as a zero copy view.
@@ -364,9 +362,8 @@ pub trait SeriesTrait:
     /// Count the null values.
     fn null_count(&self) -> usize;
 
-    /// Return if any the chunks in this `[ChunkedArray]` have a validity bitmap.
-    /// no bitmap means no null values.
-    fn has_validity(&self) -> bool;
+    /// Return if any the chunks in this `[ChunkedArray]` have nulls.
+    fn has_nulls(&self) -> bool;
 
     /// Get unique values in the Series.
     fn unique(&self) -> PolarsResult<Series> {

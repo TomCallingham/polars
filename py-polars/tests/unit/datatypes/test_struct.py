@@ -13,7 +13,7 @@ import polars.selectors as cs
 from polars.testing import assert_frame_equal, assert_series_equal
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 def test_struct_to_list() -> None:
@@ -119,10 +119,10 @@ def test_struct_unnesting() -> None:
         }
     )
     for cols in ("foo", cs.ends_with("oo")):
-        out_eager = df.unnest(cols)  # type: ignore[arg-type]
+        out_eager = df.unnest(cols)
         assert_frame_equal(out_eager, expected)
 
-        out_lazy = df.lazy().unnest(cols)  # type: ignore[arg-type]
+        out_lazy = df.lazy().unnest(cols)
         assert_frame_equal(out_lazy, expected.lazy())
 
     out = (
@@ -242,7 +242,7 @@ def test_struct_with_validity() -> None:
     tbl = pa.Table.from_pylist(data)
     df = pl.from_arrow(tbl)
     assert isinstance(df, pl.DataFrame)
-    assert df["a"].to_list() == [{"b": 1}, {"b": None}]
+    assert df["a"].to_list() == [{"b": 1}, None]
 
 
 def test_from_dicts_struct() -> None:
@@ -623,7 +623,7 @@ def test_struct_categorical_5843() -> None:
 def test_empty_struct() -> None:
     # List<struct>
     df = pl.DataFrame({"a": [[{}]]})
-    assert df.to_dict(as_series=False) == {"a": [[{"": None}]]}
+    assert df.to_dict(as_series=False) == {"a": [[None]]}
 
     # Struct one not empty
     df = pl.DataFrame({"a": [[{}, {"a": 10}]]})
@@ -631,7 +631,7 @@ def test_empty_struct() -> None:
 
     # Empty struct
     df = pl.DataFrame({"a": [{}]})
-    assert df.to_dict(as_series=False) == {"a": [{"": None}]}
+    assert df.to_dict(as_series=False) == {"a": [None]}
 
 
 @pytest.mark.parametrize(
@@ -642,7 +642,6 @@ def test_empty_struct() -> None:
         pl.List(pl.String),
         pl.Array(pl.Null, 32),
         pl.Array(pl.UInt8, 16),
-        pl.Struct,
         pl.Struct([pl.Field("", pl.Null)]),
         pl.Struct([pl.Field("x", pl.UInt32), pl.Field("y", pl.Float64)]),
     ],
@@ -654,7 +653,16 @@ def test_empty_series_nested_dtype(dtype: PolarsDataType) -> None:
     assert s.to_list() == []
 
 
-def test_empty_with_schema_struct() -> None:
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{}, {}],
+        [{}, None],
+        [None, {}],
+        [None, None],
+    ],
+)
+def test_empty_with_schema_struct(data: list[dict[str, object] | None]) -> None:
     # Empty structs, with schema
     struct_schema = {"a": pl.Date, "b": pl.Boolean, "c": pl.Float64}
     frame_schema = {"x": pl.Int8, "y": pl.Struct(struct_schema)}
@@ -662,32 +670,31 @@ def test_empty_with_schema_struct() -> None:
     @dataclass
     class TestData:
         x: int
-        y: dict  # type: ignore[type-arg]
+        y: dict[str, object] | None
 
-    # validate empty struct, null, and a mix of both
-    for empty_structs in (
-        [{}, {}],
-        [{}, None],
-        [None, {}],
-        [None, None],
-    ):
-        # test init from rows, dicts, and dataclasses
-        dict_data = {"x": [10, 20], "y": empty_structs}
-        dataclass_data = [
-            TestData(10, empty_structs[0]),  # type: ignore[index]
-            TestData(20, empty_structs[1]),  # type: ignore[index]
+    # test init from rows, dicts, and dataclasses
+    dict_data = {"x": [10, 20], "y": data}
+    dataclass_data = [
+        TestData(10, data[0]),
+        TestData(20, data[1]),
+    ]
+    for frame_data in (dict_data, dataclass_data):
+        df = pl.DataFrame(
+            data=frame_data,
+            schema=frame_schema,  # type: ignore[arg-type]
+        )
+        assert df.schema == frame_schema
+        assert df.unnest("y").columns == ["x", "a", "b", "c"]
+        assert df.rows() == [
+            (
+                10,
+                {"a": None, "b": None, "c": None} if data[0] is not None else None,
+            ),
+            (
+                20,
+                {"a": None, "b": None, "c": None} if data[1] is not None else None,
+            ),
         ]
-        for frame_data in (dict_data, dataclass_data):
-            df = pl.DataFrame(
-                data=frame_data,
-                schema=frame_schema,  # type: ignore[arg-type]
-            )
-            assert df.schema == frame_schema
-            assert df.unnest("y").columns == ["x", "a", "b", "c"]
-            assert df.rows() == [
-                (10, {"a": None, "b": None, "c": None}),
-                (20, {"a": None, "b": None, "c": None}),
-            ]
 
 
 def test_struct_null_cast() -> None:
@@ -703,7 +710,7 @@ def test_struct_null_cast() -> None:
         .lazy()
         .select([pl.lit(None, dtype=pl.Null).cast(dtype, strict=True)])
         .collect()
-    ).to_dict(as_series=False) == {"literal": [{"a": None, "b": None, "c": None}]}
+    ).to_dict(as_series=False) == {"literal": [None]}
 
 
 def test_nested_struct_in_lists_cast() -> None:
@@ -832,42 +839,6 @@ def test_struct_get_field_by_index() -> None:
     assert df.select(pl.all().struct[1]).to_dict(as_series=False) == expected
 
 
-def test_struct_null_count_10130() -> None:
-    a_0 = pl.DataFrame({"x": [None, 0, 0, 1, 1], "y": [0, 0, 1, 0, 1]}).to_struct("xy")
-    a_1 = pl.DataFrame({"x": [2, 0, 0, 1, 1], "y": [0, 0, 1, 0, 1]}).to_struct("xy")
-    a_2 = pl.DataFrame({"x": [2, 0, 0, 1, 1], "y": [0, 0, None, 0, 1]}).to_struct("xy")
-    assert a_0.null_count() == 0
-    assert a_1.null_count() == 0
-    assert a_2.null_count() == 0
-
-    b_0 = pl.DataFrame(
-        {"x": [1, None, 0, 0, 1, 1, None], "y": [None, 0, None, 0, 1, 0, 1]}
-    ).to_struct("xy")
-    b_1 = pl.DataFrame(
-        {"x": [None, None, 0, 0, 1, 1, None], "y": [None, 0, None, 0, 1, 0, 1]}
-    ).to_struct("xy")
-    assert b_0.null_count() == 0
-    assert b_1.null_count() == 1
-
-    c_0 = pl.DataFrame({"x": [None, None]}).to_struct("x")
-    c_1 = pl.DataFrame({"y": [1, 2], "x": [None, None]}).to_struct("xy")
-    c_2 = pl.DataFrame({"x": [None, None], "y": [1, 2]}).to_struct("xy")
-    assert c_0.null_count() == 2
-    assert c_1.null_count() == 0
-    assert c_2.null_count() == 0
-
-    # There was an issue where it could ignore parts of a multi-chunk Series
-    s = pl.Series([{"a": 1, "b": 2}])
-    r = pl.Series(
-        [{"a": None, "b": None}], dtype=pl.Struct({"a": pl.Int64, "b": pl.Int64})
-    )
-    s.append(r)
-    assert s.null_count() == 1
-
-    s = pl.Series([{"a": None}])
-    assert s.null_count() == 1
-
-
 def test_struct_arithmetic_schema() -> None:
     q = pl.LazyFrame({"A": [1], "B": [2]})
 
@@ -932,3 +903,123 @@ def test_struct_split_16536() -> None:
 
     df = pl.concat([df, df, df, df], rechunk=False)
     assert df.filter(pl.col("int") == 1).shape == (4, 3)
+
+
+def test_struct_wildcard_expansion_and_exclude() -> None:
+    df = pl.DataFrame(
+        {
+            "id": [1, 2],
+            "meta_data": [
+                {"system_data": "to_remove", "user_data": "keep"},
+                {"user_data": "keep_"},
+            ],
+        }
+    )
+
+    # ensure wildcard expansion is on input
+    assert df.lazy().select(
+        pl.col("meta_data").struct.with_fields("*")
+    ).collect().schema["meta_data"].fields == [  # type: ignore[attr-defined]
+        pl.Field("system_data", pl.String),
+        pl.Field("user_data", pl.String),
+        pl.Field("id", pl.Int64),
+        pl.Field(
+            "meta_data", pl.Struct({"system_data": pl.String, "user_data": pl.String})
+        ),
+    ]
+
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        df.lazy().select(
+            pl.col("meta_data").struct.with_fields(pl.field("*").exclude("user_data"))
+        ).collect()
+
+
+def test_struct_chunked_gather_17603() -> None:
+    df = pl.DataFrame(
+        {
+            "id": [0, 0, 1, 1],
+            "a": [0, 1, 2, 3],
+        }
+    ).select("id", pl.struct("a"))
+    df = pl.concat((df, df))
+
+    assert df.select(pl.col("a").map_batches(lambda s: s).over("id")).to_dict(
+        as_series=False
+    ) == {
+        "a": [
+            {"a": 0},
+            {"a": 1},
+            {"a": 2},
+            {"a": 3},
+            {"a": 0},
+            {"a": 1},
+            {"a": 2},
+            {"a": 3},
+        ]
+    }
+
+
+def test_struct_out_nullability_from_arrow() -> None:
+    df = pl.DataFrame(pd.DataFrame({"abc": [{"a": 1.0, "b": pd.NA}, pd.NA]}))
+    res = df.select(a=pl.col("abc").struct.field("a"))
+    assert res.to_dicts() == [{"a": 1.0}, {"a": None}]
+
+
+def test_empty_struct_raise() -> None:
+    with pytest.raises(ValueError):
+        pl.struct()
+
+
+def test_named_exprs() -> None:
+    df = pl.DataFrame({"a": 1})
+    schema = {"b": pl.Int64}
+    res = df.select(pl.struct(schema=schema, b=pl.col("a")))
+    assert res.to_dict(as_series=False) == {"b": [{"b": 1}]}
+    assert res.schema["b"] == pl.Struct(schema)
+
+
+def test_struct_outer_nullability_zip_18119() -> None:
+    df = pl.Series("int", [0, 1, 2, 3], dtype=pl.Int64).to_frame()
+    assert df.lazy().with_columns(
+        result=pl.when(pl.col("int") >= 1).then(
+            pl.struct(
+                a=pl.when(pl.col("int") % 2 == 1).then(True),
+                b=pl.when(pl.col("int") >= 2).then(False),
+            )
+        )
+    ).collect().to_dict(as_series=False) == {
+        "int": [0, 1, 2, 3],
+        "result": [
+            None,
+            {"a": True, "b": None},
+            {"a": None, "b": False},
+            {"a": True, "b": False},
+        ],
+    }
+
+
+def test_struct_group_by_shift_18107() -> None:
+    df_in = pl.DataFrame(
+        {
+            "group": [1, 1, 1, 2, 2, 2],
+            "id": [1, 2, 3, 4, 5, 6],
+            "value": [
+                {"lon": 20, "lat": 10},
+                {"lon": 30, "lat": 20},
+                {"lon": 40, "lat": 30},
+                {"lon": 50, "lat": 40},
+                {"lon": 60, "lat": 50},
+                {"lon": 70, "lat": 60},
+            ],
+        }
+    )
+
+    assert df_in.group_by("group", maintain_order=True).agg(
+        pl.col("value").shift(-1)
+    ).to_dict(as_series=False) == {
+        "group": [1, 2],
+        "value": [
+            [{"lon": 30, "lat": 20}, {"lon": 40, "lat": 30}, None],
+            [{"lon": 60, "lat": 50}, {"lon": 70, "lat": 60}, None],
+        ],
+    }

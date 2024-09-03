@@ -11,8 +11,7 @@ if TYPE_CHECKING:
     import datetime as dt
 
     from polars import Expr, Series
-    from polars.polars import PySeries
-    from polars.type_aliases import (
+    from polars._typing import (
         Ambiguous,
         EpochTimeUnit,
         IntoExpr,
@@ -22,6 +21,7 @@ if TYPE_CHECKING:
         TemporalLiteral,
         TimeUnit,
     )
+    from polars.polars import PySeries
 
 
 @expr_dispatch
@@ -1642,7 +1642,7 @@ class DateTimeNameSpace:
         ]
         """
 
-    def truncate(self, every: str | dt.timedelta | Expr) -> Series:
+    def truncate(self, every: str | dt.timedelta | IntoExprColumn) -> Series:
         """
         Divide the date/ datetime range into buckets.
 
@@ -1764,10 +1764,12 @@ class DateTimeNameSpace:
             This functionality is considered **unstable**. It may be changed
             at any point without it being considered a breaking change.
 
-        Each date/datetime in the first half of the interval is mapped to the start of
-        its bucket.
-        Each date/datetime in the second half of the interval is mapped to the end of
-        its bucket.
+        - Each date/datetime in the first half of the interval
+          is mapped to the start of its bucket.
+        - Each date/datetime in the second half of the interval
+          is mapped to the end of its bucket.
+        - Half-way points are mapped to the start of their bucket.
+
         Ambiguous results are localized using the DST offset of the original timestamp -
         for example, rounding `'2022-11-06 01:20:00 CST'` by `'1h'` results in
         `'2022-11-06 01:00:00 CST'`, whereas rounding `'2022-11-06 01:20:00 CDT'` by

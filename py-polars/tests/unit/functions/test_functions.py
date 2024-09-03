@@ -10,7 +10,7 @@ from polars.exceptions import DuplicateError, InvalidOperationError
 from polars.testing import assert_frame_equal, assert_series_equal
 
 if TYPE_CHECKING:
-    from polars.type_aliases import ConcatMethod
+    from polars._typing import ConcatMethod
 
 
 def test_concat_align() -> None:
@@ -265,7 +265,7 @@ def test_align_frames() -> None:
     assert_frame_equal(lf2.collect(), pf2)
 
     # misc
-    assert [] == pl.align_frames(on="date")
+    assert pl.align_frames(on="date") == []
 
     # expected error condition
     with pytest.raises(TypeError):
@@ -511,7 +511,7 @@ def test_count() -> None:
         pl.count("b", "a"),
         [pl.count("b"), pl.count("a")],
     ):
-        out = df.select(count_expr)  # type: ignore[arg-type]
+        out = df.select(count_expr)
         assert out.rows() == [(2, 3)]
 
 

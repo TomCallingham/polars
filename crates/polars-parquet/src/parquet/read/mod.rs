@@ -7,16 +7,16 @@ mod page;
 #[cfg(feature = "async")]
 mod stream;
 
-use std::io::{Read, Seek, SeekFrom};
-use std::sync::Arc;
+use std::io::{Seek, SeekFrom};
 
 pub use column::*;
-pub use compression::{decompress, BasicDecompressor, Decompressor};
+pub use compression::{decompress, BasicDecompressor};
 pub use indexes::{read_columns_indexes, read_pages_locations};
 pub use metadata::{deserialize_metadata, read_metadata, read_metadata_with_size};
 #[cfg(feature = "async")]
 pub use page::{get_page_stream, get_page_stream_from_column_start};
-pub use page::{IndexedPageReader, PageFilter, PageIterator, PageMetaData, PageReader};
+pub use page::{PageIterator, PageMetaData, PageReader};
+use polars_utils::mmap::MemReader;
 #[cfg(feature = "async")]
 pub use stream::read_metadata as read_metadata_async;
 
@@ -41,21 +41,17 @@ pub fn filter_row_groups(
 }
 
 /// Returns a new [`PageReader`] by seeking `reader` to the beginning of `column_chunk`.
-pub fn get_page_iterator<R: Read + Seek>(
+pub fn get_page_iterator(
     column_chunk: &ColumnChunkMetaData,
-    mut reader: R,
-    pages_filter: Option<PageFilter>,
+    mut reader: MemReader,
     scratch: Vec<u8>,
     max_page_size: usize,
-) -> ParquetResult<PageReader<R>> {
-    let pages_filter = pages_filter.unwrap_or_else(|| Arc::new(|_, _| true));
-
+) -> ParquetResult<PageReader> {
     let (col_start, _) = column_chunk.byte_range();
     reader.seek(SeekFrom::Start(col_start))?;
     Ok(PageReader::new(
         reader,
         column_chunk,
-        pages_filter,
         scratch,
         max_page_size,
     ))

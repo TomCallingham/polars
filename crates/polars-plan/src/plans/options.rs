@@ -2,6 +2,7 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
+use bitflags::bitflags;
 use polars_core::prelude::*;
 use polars_core::utils::SuperTypeOptions;
 #[cfg(feature = "csv")]
@@ -18,6 +19,8 @@ use polars_time::{DynamicGroupOptions, RollingGroupOptions};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use crate::dsl::Selector;
+use crate::plans::{ColumnName, ExprIR};
 #[cfg(feature = "python")]
 use crate::prelude::python_udf::PythonFunction;
 
@@ -27,13 +30,15 @@ pub type FileCount = u32;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 /// Generic options for all file types.
 pub struct FileScanOptions {
-    pub n_rows: Option<usize>,
+    pub slice: Option<(i64, usize)>,
     pub with_columns: Option<Arc<[String]>>,
     pub cache: bool,
     pub row_index: Option<RowIndex>,
     pub rechunk: bool,
     pub file_counter: FileCount,
     pub hive_options: HiveOptions,
+    pub glob: bool,
+    pub include_file_paths: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug, Copy, Default, Eq, PartialEq, Hash)]
@@ -67,9 +72,22 @@ pub struct GroupbyOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq, Default, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct DistinctOptions {
+pub struct DistinctOptionsDSL {
     /// Subset of columns that will be taken into account.
-    pub subset: Option<Arc<Vec<String>>>,
+    pub subset: Option<Vec<Selector>>,
+    /// This will maintain the order of the input.
+    /// Note that this is more expensive.
+    /// `maintain_order` is not supported in the streaming
+    /// engine.
+    pub maintain_order: bool,
+    /// Which rows to keep.
+    pub keep_strategy: UniqueKeepStrategy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DistinctOptionsIR {
+    /// Subset of columns that will be taken into account.
+    pub subset: Option<Arc<[ColumnName]>>,
     /// This will maintain the order of the input.
     /// Note that this is more expensive.
     /// `maintain_order` is not supported in the streaming
@@ -106,6 +124,59 @@ impl Default for UnsafeBool {
     }
 }
 
+bitflags!(
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+        pub struct FunctionFlags: u8 {
+            // Raise if use in group by
+            const ALLOW_GROUP_AWARE = 1 << 0;
+            // For example a `unique` or a `slice`
+            const CHANGES_LENGTH = 1 << 1;
+            // The physical expression may rename the output of this function.
+            // If set to `false` the physical engine will ensure the left input
+            // expression is the output name.
+            const ALLOW_RENAME = 1 << 2;
+            // if set, then the `Series` passed to the function in the group_by operation
+            // will ensure the name is set. This is an extra heap allocation per group.
+            const PASS_NAME_TO_APPLY = 1 << 3;
+            /// There can be two ways of expanding wildcards:
+            ///
+            /// Say the schema is 'a', 'b' and there is a function `f`. In this case, `f('*')` can expand
+            /// to:
+            /// 1. `f('a', 'b')`
+            /// 2. `f('a'), f('b')`
+            ///
+            /// Setting this to true, will lead to behavior 1.
+            ///
+            /// This also accounts for regex expansion.
+            const INPUT_WILDCARD_EXPANSION = 1 << 4;
+            /// Automatically explode on unit length if it ran as final aggregation.
+            ///
+            /// this is the case for aggregations like sum, min, covariance etc.
+            /// We need to know this because we cannot see the difference between
+            /// the following functions based on the output type and number of elements:
+            ///
+            /// x: {1, 2, 3}
+            ///
+            /// head_1(x) -> {1}
+            /// sum(x) -> {4}
+            const RETURNS_SCALAR = 1 << 5;
+            /// This can happen with UDF's that use Polars within the UDF.
+            /// This can lead to recursively entering the engine and sometimes deadlocks.
+            /// This flag must be set to handle that.
+            const OPTIONAL_RE_ENTRANT = 1 << 6;
+            /// Whether this function allows no inputs.
+            const ALLOW_EMPTY_INPUTS = 1 << 7;
+        }
+);
+
+impl Default for FunctionFlags {
+    fn default() -> Self {
+        Self::from_bits_truncate(0) | Self::ALLOW_GROUP_AWARE
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct FunctionOptions {
@@ -115,47 +186,15 @@ pub struct FunctionOptions {
     // used for formatting, (only for anonymous functions)
     #[cfg_attr(feature = "serde", serde(skip_deserializing))]
     pub fmt_str: &'static str,
-    /// There can be two ways of expanding wildcards:
-    ///
-    /// Say the schema is 'a', 'b' and there is a function `f`. In this case, `f('*')` can expand
-    /// to:
-    /// 1. `f('a', 'b')`
-    /// 2. `f('a'), f('b')`
-    ///
-    /// Setting this to true, will lead to behavior 1.
-    ///
-    /// This also accounts for regex expansion.
-    pub input_wildcard_expansion: bool,
-    /// Automatically explode on unit length if it ran as final aggregation.
-    ///
-    /// this is the case for aggregations like sum, min, covariance etc.
-    /// We need to know this because we cannot see the difference between
-    /// the following functions based on the output type and number of elements:
-    ///
-    /// x: {1, 2, 3}
-    ///
-    /// head_1(x) -> {1}
-    /// sum(x) -> {4}
-    pub returns_scalar: bool,
     // if the expression and its inputs should be cast to supertypes
     // `None` -> Don't cast.
     // `Some` -> cast with given options.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub cast_to_supertypes: Option<SuperTypeOptions>,
-    // The physical expression may rename the output of this function.
-    // If set to `false` the physical engine will ensure the left input
-    // expression is the output name.
-    pub allow_rename: bool,
-    // if set, then the `Series` passed to the function in the group_by operation
-    // will ensure the name is set. This is an extra heap allocation per group.
-    pub pass_name_to_apply: bool,
-    // For example a `unique` or a `slice`
-    pub changes_length: bool,
     // Validate the output of a `map`.
     // this should always be true or we could OOB
     pub check_lengths: UnsafeBool,
-    // Raise if use in group by
-    pub allow_group_aware: bool,
+    pub flags: FunctionFlags,
 }
 
 impl FunctionOptions {
@@ -180,15 +219,10 @@ impl Default for FunctionOptions {
     fn default() -> Self {
         FunctionOptions {
             collect_groups: ApplyOptions::GroupWise,
-            input_wildcard_expansion: false,
-            returns_scalar: false,
             fmt_str: "",
             cast_to_supertypes: None,
-            allow_rename: false,
-            pass_name_to_apply: false,
-            changes_length: false,
             check_lengths: UnsafeBool(true),
-            allow_group_aware: true,
+            flags: Default::default(),
         }
     }
 }
@@ -207,16 +241,41 @@ pub struct LogicalPlanUdfOptions {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg(feature = "python")]
 pub struct PythonOptions {
+    /// A function that returns a Python Generator.
+    /// The generator should produce Polars DataFrame's.
     pub scan_fn: Option<PythonFunction>,
+    /// Schema of the file.
     pub schema: SchemaRef,
+    /// Schema the reader will produce when the file is read.
     pub output_schema: Option<SchemaRef>,
+    // Projected column names.
     pub with_columns: Option<Arc<[String]>>,
-    pub pyarrow: bool,
-    // a pyarrow predicate python expression
-    // can be evaluated with python.eval
-    pub predicate: Option<String>,
-    // a `head` call passed to pyarrow
+    // Which interface is the python function.
+    pub python_source: PythonScanSource,
+    /// Optional predicate the reader must apply.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub predicate: PythonPredicate,
+    /// A `head` call passed to the reader.
     pub n_rows: Option<usize>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum PythonScanSource {
+    Pyarrow,
+    Cuda,
+    #[default]
+    IOPlugin,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum PythonPredicate {
+    // A pyarrow predicate python expression
+    // can be evaluated with python.eval
+    PyArrow(String),
+    Polars(ExprIR),
+    #[default]
+    None,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, Hash)]
@@ -342,4 +401,5 @@ pub struct NDJsonReadOptions {
     pub low_memory: bool,
     pub ignore_errors: bool,
     pub schema: Option<SchemaRef>,
+    pub schema_overwrite: Option<SchemaRef>,
 }

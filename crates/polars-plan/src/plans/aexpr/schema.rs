@@ -76,10 +76,13 @@ impl AExpr {
             Column(name) => schema
                 .get_field(name)
                 .ok_or_else(|| PolarsError::ColumnNotFound(name.to_string().into())),
-            Literal(sv) => Ok(match sv {
-                LiteralValue::Series(s) => s.field().into_owned(),
-                _ => Field::new(sv.output_name(), sv.get_datatype()),
-            }),
+            Literal(sv) => {
+                *nested = 0;
+                Ok(match sv {
+                    LiteralValue::Series(s) => s.field().into_owned(),
+                    _ => Field::new(sv.output_name(), sv.get_datatype()),
+                })
+            },
             BinaryExpr { left, right, op } => {
                 use DataType::*;
 
@@ -246,6 +249,8 @@ impl AExpr {
                 options,
                 ..
             } => {
+                *nested = nested
+                    .saturating_sub(options.flags.contains(FunctionFlags::RETURNS_SCALAR) as _);
                 let tmp = function.get_output();
                 let output_type = tmp.as_ref().unwrap_or(output_type);
                 let fields = func_args_to_fields(input, schema, arena, nested)?;
@@ -253,19 +258,17 @@ impl AExpr {
                 output_type.get_field(schema, Context::Default, &fields)
             },
             Function {
-                function, input, ..
+                function,
+                input,
+                options,
             } => {
+                *nested = nested
+                    .saturating_sub(options.flags.contains(FunctionFlags::RETURNS_SCALAR) as _);
                 let fields = func_args_to_fields(input, schema, arena, nested)?;
                 polars_ensure!(!fields.is_empty(), ComputeError: "expression: '{}' didn't get any inputs", function);
                 function.get_field(schema, Context::Default, &fields)
             },
             Slice { input, .. } => arena.get(*input).to_field_impl(schema, arena, nested),
-            Wildcard => {
-                polars_bail!(ComputeError: "wildcard column selection not supported at this point")
-            },
-            Nth(n) => {
-                polars_bail!(ComputeError: "nth column selection not supported at this point (n={})", n)
-            },
         }
     }
 }
@@ -327,6 +330,7 @@ fn get_arithmetic_field(
                 | (Date, Duration(_))
                 | (Duration(_), Time)
                 | (Time, Duration(_)) => try_get_supertype(left_field.data_type(), &right_type)?,
+                (Datetime(tu, _), Date) | (Date, Datetime(tu, _)) => Duration(*tu),
                 // T - T != T if T is a datetime / date
                 (Datetime(tul, _), Datetime(tur, _)) => Duration(get_time_units(tul, tur)),
                 (_, Datetime(_, _)) | (Datetime(_, _), _) => {

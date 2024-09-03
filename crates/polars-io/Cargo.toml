@@ -15,22 +15,23 @@ polars-json = { workspace = true, optional = true }
 polars-parquet = { workspace = true, optional = true }
 polars-hdf5 = { workspace = true, optional = true }
 polars-time = { workspace = true, features = [], optional = true }
-polars-utils = { workspace = true }
+polars-utils = { workspace = true, features = ['mmap'] }
 
 ahash = { workspace = true }
 arrow = { workspace = true }
 async-trait = { version = "0.1.59", optional = true }
 atoi_simd = { workspace = true, optional = true }
 blake3 = { version = "1.5.1", optional = true }
-bytes = { version = "1.3" }
+bytes = { workspace = true }
 chrono = { workspace = true, optional = true }
 chrono-tz = { workspace = true, optional = true }
 fast-float = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+glob = { version = "0.3" }
 itoa = { workspace = true, optional = true }
 memchr = { workspace = true }
-memmap = { package = "memmap2", version = "0.7" }
+memmap = { workspace = true }
 num-traits = { workspace = true }
 object_store = { workspace = true, optional = true }
 once_cell = { workspace = true }
@@ -39,11 +40,8 @@ rayon = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, optional = true }
 ryu = { workspace = true, optional = true }
-serde = { workspace = true, features = ["derive", "rc"], optional = true }
-serde_json = { version = "1", default-features = false, features = [
-  "alloc",
-  "raw_value",
-], optional = true }
+serde = { workspace = true, features = ["rc"], optional = true }
+serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 simd-json = { workspace = true, optional = true }
 simdutf8 = { workspace = true, optional = true }
 smartstring = { workspace = true }
@@ -58,7 +56,7 @@ url = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-fs4 = { version = "0.8.3", features = ["sync"], optional = true }
+fs4 = { version = "0.9", features = ["sync"], optional = true }
 home = "0.5.4"
 
 [dev-dependencies]
@@ -71,7 +69,6 @@ json = [
   "polars-json",
   "simd-json",
   "atoi_simd",
-  "serde_json",
   "dtype-struct",
   "csv",
 ]
@@ -98,14 +95,14 @@ dtype-datetime = [
   "polars-time/dtype-datetime",
   "chrono",
 ]
-timezones = ["chrono-tz", "dtype-datetime", "arrow/timezones"]
-dtype-time = [
-  "polars-core/dtype-time",
-  "polars-core/temporal",
-  "polars-time/dtype-time",
+timezones = [
+  "chrono-tz",
+  "dtype-datetime",
+  "arrow/timezones",
+  "polars-json?/chrono-tz",
 ]
 dtype-struct = ["polars-core/dtype-struct"]
-dtype-decimal = ["polars-core/dtype-decimal"]
+dtype-decimal = ["polars-core/dtype-decimal", "polars-json?/dtype-decimal"]
 fmt = ["polars-core/fmt"]
 lazy = []
 parquet = ["polars-parquet", "polars-parquet/compression"]
@@ -127,6 +124,8 @@ cloud = [
   "serde_json",
   "serde",
   "file_cache",
+  "reqwest",
+  "http",
 ]
 file_cache = ["async", "dep:blake3", "dep:fs4"]
 aws = ["object_store/aws", "cloud", "reqwest"]

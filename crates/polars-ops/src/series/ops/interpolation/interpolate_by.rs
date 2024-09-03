@@ -87,12 +87,12 @@ fn interpolate_impl_by_sorted<T, F, I>(
 ) -> PolarsResult<ChunkedArray<T>>
 where
     T: PolarsNumericType,
-    F: PolarsIntegerType,
+    F: PolarsNumericType,
     I: Fn(T::Native, T::Native, &[F::Native], &mut Vec<T::Native>),
 {
     // This implementation differs from pandas as that boundary None's are not removed.
     // This prevents a lot of errors due to expressions leading to different lengths.
-    if !chunked_arr.has_validity() || chunked_arr.null_count() == chunked_arr.len() {
+    if !chunked_arr.has_nulls() || chunked_arr.null_count() == chunked_arr.len() {
         return Ok(chunked_arr.clone());
     }
 
@@ -151,7 +151,7 @@ where
         }
 
         let array = PrimitiveArray::new(
-            T::get_dtype().to_arrow(true),
+            T::get_dtype().to_arrow(CompatLevel::newest()),
             out.into(),
             Some(validity.into()),
         );
@@ -169,12 +169,12 @@ fn interpolate_impl_by<T, F, I>(
 ) -> PolarsResult<ChunkedArray<T>>
 where
     T: PolarsNumericType,
-    F: PolarsIntegerType,
+    F: PolarsNumericType,
     I: Fn(T::Native, T::Native, &[F::Native], &mut [T::Native], &[IdxSize]),
 {
     // This implementation differs from pandas as that boundary None's are not removed.
     // This prevents a lot of errors due to expressions leading to different lengths.
-    if !ca.has_validity() || ca.null_count() == ca.len() {
+    if !ca.has_nulls() || ca.null_count() == ca.len() {
         return Ok(ca.clone());
     }
 
@@ -253,7 +253,7 @@ where
         }
 
         let array = PrimitiveArray::new(
-            T::get_dtype().to_arrow(true),
+            T::get_dtype().to_arrow(CompatLevel::newest()),
             out.into(),
             Some(validity.into()),
         );
@@ -273,7 +273,7 @@ pub fn interpolate_by(s: &Series, by: &Series, by_is_sorted: bool) -> PolarsResu
     ) -> PolarsResult<Series>
     where
         T: PolarsNumericType,
-        F: PolarsIntegerType,
+        F: PolarsNumericType,
         ChunkedArray<T>: IntoSeries,
     {
         if is_sorted {
@@ -290,6 +290,18 @@ pub fn interpolate_by(s: &Series, by: &Series, by_is_sorted: bool) -> PolarsResu
     }
 
     match (s.dtype(), by.dtype()) {
+        (DataType::Float64, DataType::Float64) => {
+            func(s.f64().unwrap(), by.f64().unwrap(), by_is_sorted)
+        },
+        (DataType::Float64, DataType::Float32) => {
+            func(s.f64().unwrap(), by.f32().unwrap(), by_is_sorted)
+        },
+        (DataType::Float32, DataType::Float64) => {
+            func(s.f32().unwrap(), by.f64().unwrap(), by_is_sorted)
+        },
+        (DataType::Float32, DataType::Float32) => {
+            func(s.f32().unwrap(), by.f32().unwrap(), by_is_sorted)
+        },
         (DataType::Float64, DataType::Int64) => {
             func(s.f64().unwrap(), by.i64().unwrap(), by_is_sorted)
         },
@@ -326,7 +338,7 @@ pub fn interpolate_by(s: &Series, by: &Series, by_is_sorted: bool) -> PolarsResu
         _ => {
             polars_bail!(InvalidOperation: "expected series to be Float64, Float32, \
                 Int64, Int32, UInt64, UInt32, and `by` to be Date, Datetime, Int64, Int32, \
-                UInt64, or UInt32")
+                UInt64, UInt32, Float32 or Float64")
         },
     }
 }

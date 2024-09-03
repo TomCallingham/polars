@@ -34,8 +34,14 @@ pub enum ParquetError {
 }
 
 impl ParquetError {
+    /// Create an OutOfSpec error from any Into<String>
     pub(crate) fn oos<I: Into<String>>(message: I) -> Self {
         Self::OutOfSpec(message.into())
+    }
+
+    /// Create an FeatureNotSupported error from any Into<String>
+    pub(crate) fn not_supported<I: Into<String>>(message: I) -> Self {
+        Self::FeatureNotSupported(message.into())
     }
 }
 

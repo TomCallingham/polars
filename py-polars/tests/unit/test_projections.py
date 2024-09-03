@@ -511,3 +511,57 @@ def test_projection_pushdown_semi_anti_no_selection(
     assert "PROJECT 1/2" in (
         q_a.join(q_b, left_on="a", right_on="b", how=how).explain()
     )
+
+
+def test_projection_empty_frame_len_16904() -> None:
+    df = pl.LazyFrame({})
+
+    q = df.select(pl.len())
+
+    assert "PROJECT */0" in q.explain()
+
+    expect = pl.DataFrame({"len": [0]}, schema_overrides={"len": pl.UInt32()})
+    assert_frame_equal(q.collect(), expect)
+
+
+def test_projection_literal_no_alias_17739() -> None:
+    df = pl.LazyFrame({})
+    assert df.select(pl.lit(False)).select("literal").collect().to_dict(
+        as_series=False
+    ) == {"literal": [False]}
+
+
+def test_projections_collapse_17781() -> None:
+    frame1 = pl.LazyFrame(
+        {
+            "index": [0],
+            "data1": [0],
+            "data2": [0],
+        }
+    )
+    frame2 = pl.LazyFrame(
+        {
+            "index": [0],
+            "label1": [True],
+            "label2": [False],
+            "label3": [False],
+        },
+        schema=[
+            ("index", pl.Int64),
+            ("label1", pl.Boolean),
+            ("label2", pl.Boolean),
+            ("label3", pl.Boolean),
+        ],
+    )
+    cols = ["index", "data1", "label1", "label2"]
+
+    lf = None
+    for lfj in [frame1, frame2]:
+        use_columns = [c for c in cols if c in lfj.collect_schema().names()]
+        lfj = lfj.select(use_columns)
+        lfj = lfj.select(use_columns)
+        if lf is None:
+            lf = lfj
+        else:
+            lf = lf.join(lfj, on="index", how="left")
+    assert "SELECT " not in lf.explain()  # type: ignore[union-attr]

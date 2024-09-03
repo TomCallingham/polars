@@ -70,11 +70,13 @@ where
                 };
 
                 let array = PrimitiveArray::new(
-                    T::get_dtype().to_arrow(true),
+                    T::get_dtype().to_arrow(CompatLevel::newest()),
                     list_values.into(),
                     validity,
                 );
-                let data_type = ListArray::<i64>::default_datatype(T::get_dtype().to_arrow(true));
+                let data_type = ListArray::<i64>::default_datatype(
+                    T::get_dtype().to_arrow(CompatLevel::newest()),
+                );
                 // SAFETY:
                 // offsets are monotonically increasing
                 let arr = ListArray::<i64>::new(
@@ -133,11 +135,13 @@ where
                 };
 
                 let array = PrimitiveArray::new(
-                    T::get_dtype().to_arrow(true),
+                    T::get_dtype().to_arrow(CompatLevel::newest()),
                     list_values.into(),
                     validity,
                 );
-                let data_type = ListArray::<i64>::default_datatype(T::get_dtype().to_arrow(true));
+                let data_type = ListArray::<i64>::default_datatype(
+                    T::get_dtype().to_arrow(CompatLevel::newest()),
+                );
                 let arr = ListArray::<i64>::new(
                     data_type,
                     Offsets::new_unchecked(offsets).into(),
@@ -276,15 +280,14 @@ impl<T: PolarsObject> AggList for ObjectChunked<T> {
 #[cfg(feature = "dtype-struct")]
 impl AggList for StructChunked {
     unsafe fn agg_list(&self, groups: &GroupsProxy) -> Series {
-        let mut ca = self.clone();
-        ca.rechunk();
+        let ca = self.clone();
         let (gather, offsets, can_fast_explode) = groups.prepare_list_agg(self.len());
 
         let gathered = if let Some(gather) = gather {
             let out = ca.into_series().take_unchecked(&gather);
             out.struct_().unwrap().clone()
         } else {
-            ca
+            ca.rechunk()
         };
 
         let arr = gathered.chunks()[0].clone();

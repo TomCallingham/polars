@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::new_empty_array;
@@ -41,9 +40,8 @@ where
     fn finish(&mut self, df: &mut DataFrame) -> PolarsResult<()>;
 }
 
-pub trait WriterFactory {
-    fn create_writer<W: Write + 'static>(&self, writer: W) -> Box<dyn SerWriter<W>>;
-    fn extension(&self) -> PathBuf;
+pub trait WriteDataFrameToFile {
+    fn write_df_to_file<W: std::io::Write>(&self, df: DataFrame, file: W) -> PolarsResult<()>;
 }
 
 pub trait ArrowReader {
@@ -120,13 +118,13 @@ pub(crate) fn finish_reader<R: ArrowReader>(
 
 pub(crate) fn schema_to_arrow_checked(
     schema: &Schema,
-    pl_flavor: bool,
+    compat_level: CompatLevel,
     _file_name: &str,
 ) -> PolarsResult<ArrowSchema> {
     let fields = schema.iter_fields().map(|field| {
         #[cfg(feature = "object")]
         polars_ensure!(!matches!(field.data_type(), DataType::Object(_, _)), ComputeError: "cannot write 'Object' datatype to {}", _file_name);
-        Ok(field.data_type().to_arrow_field(field.name().as_str(), pl_flavor))
+        Ok(field.data_type().to_arrow_field(field.name().as_str(), compat_level))
     }).collect::<PolarsResult<Vec<_>>>()?;
     Ok(ArrowSchema::from(fields))
 }

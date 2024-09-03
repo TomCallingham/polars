@@ -156,8 +156,12 @@ impl Series {
         while let Some(dim) = dims.pop_back() {
             prev_dtype = DataType::Array(Box::new(prev_dtype), dim as usize);
 
-            prev_array =
-                FixedSizeListArray::new(prev_dtype.to_arrow(true), prev_array, None).boxed();
+            prev_array = FixedSizeListArray::new(
+                prev_dtype.to_arrow(CompatLevel::newest()),
+                prev_array,
+                None,
+            )
+            .boxed();
         }
         Ok(unsafe {
             Series::from_chunks_and_dtype_unchecked(
@@ -198,7 +202,7 @@ impl Series {
                 let mut cols = dimensions[1];
 
                 if s_ref.len() == 0_usize {
-                    if (rows == -1 || rows == 0) && (cols == -1 || cols == 0) {
+                    if (rows == -1 || rows == 0) && (cols == -1 || cols == 0 || cols == 1) {
                         let s = reshape_fast_path(s.name(), s_ref);
                         return Ok(s);
                     } else {

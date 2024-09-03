@@ -143,7 +143,7 @@ unsafe fn gather_idx_array_unchecked<A: StaticArray>(
 
 impl<T: PolarsDataType, I: AsRef<[IdxSize]> + ?Sized> ChunkTakeUnchecked<I> for ChunkedArray<T>
 where
-    T: PolarsDataType<HasViews = FalseT>,
+    T: PolarsDataType<HasViews = FalseT, IsStruct = FalseT>,
 {
     /// Gather values from ChunkedArray by index.
     unsafe fn take_unchecked(&self, indices: &I) -> Self {
@@ -155,7 +155,7 @@ where
         }
         let targets: Vec<_> = ca.downcast_iter().collect();
         let arr = gather_idx_array_unchecked(
-            ca.dtype().to_arrow(true),
+            ca.dtype().to_arrow(CompatLevel::newest()),
             &targets,
             ca.null_count() > 0,
             indices.as_ref(),
@@ -178,7 +178,7 @@ pub fn _update_gather_sorted_flag(sorted_arr: IsSorted, sorted_idx: IsSorted) ->
 
 impl<T: PolarsDataType> ChunkTakeUnchecked<IdxCa> for ChunkedArray<T>
 where
-    T: PolarsDataType<HasViews = FalseT>,
+    T: PolarsDataType<HasViews = FalseT, IsStruct = FalseT>,
 {
     /// Gather values from ChunkedArray by index.
     unsafe fn take_unchecked(&self, indices: &IdxCa) -> Self {
@@ -192,7 +192,7 @@ where
         let targets: Vec<_> = ca.downcast_iter().collect();
 
         let chunks = indices.downcast_iter().map(|idx_arr| {
-            let dtype = ca.dtype().to_arrow(true);
+            let dtype = ca.dtype().to_arrow(CompatLevel::newest());
             if idx_arr.null_count() == 0 {
                 gather_idx_array_unchecked(dtype, &targets, targets_have_nulls, idx_arr.values())
             } else if targets.len() == 1 {
@@ -275,6 +275,29 @@ impl<I: AsRef<[IdxSize]> + ?Sized> ChunkTakeUnchecked<I> for StringChunked {
         self.as_binary()
             .take_unchecked(indices)
             .to_string_unchecked()
+    }
+}
+
+#[cfg(feature = "dtype-struct")]
+impl ChunkTakeUnchecked<IdxCa> for StructChunked {
+    unsafe fn take_unchecked(&self, indices: &IdxCa) -> Self {
+        let a = self.rechunk();
+        let index = indices.rechunk();
+
+        let chunks = a
+            .downcast_iter()
+            .zip(index.downcast_iter())
+            .map(|(arr, idx)| take_unchecked(arr, idx))
+            .collect::<Vec<_>>();
+        self.copy_with_chunks(chunks)
+    }
+}
+
+#[cfg(feature = "dtype-struct")]
+impl<I: AsRef<[IdxSize]> + ?Sized> ChunkTakeUnchecked<I> for StructChunked {
+    unsafe fn take_unchecked(&self, indices: &I) -> Self {
+        let idx = IdxCa::mmap_slice("", indices.as_ref());
+        self.take_unchecked(&idx)
     }
 }
 

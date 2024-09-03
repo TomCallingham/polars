@@ -7,7 +7,6 @@ use crate::prelude::visitor::AexprNode;
 
 const SERIES_LIMIT: usize = 1000;
 
-use ahash::RandomState;
 use polars_core::hashing::_boost_hash_combine;
 
 #[derive(Debug, Clone)]
@@ -45,7 +44,7 @@ impl ProjectionExprs {
 pub(super) struct Identifier {
     inner: Option<u64>,
     last_node: Option<AexprNode>,
-    hb: RandomState,
+    hb: PlRandomState,
 }
 
 impl Identifier {
@@ -53,7 +52,7 @@ impl Identifier {
         Self {
             inner: None,
             last_node: None,
-            hb: RandomState::with_seed(0),
+            hb: PlRandomState::with_seed(0),
         }
     }
 
@@ -798,13 +797,12 @@ impl RewritingVisitor for CommonSubExprOptimizer {
                             ProjectionOptions {
                                 run_parallel: options.run_parallel,
                                 duplicate_check: options.duplicate_check,
-                                // TODO: Somewhat of a hack, we're
-                                // going to extend the input dataframe
-                                // with the result of evaluating these
-                                // expressions and then select them
-                                // out again. That means that we don't
-                                // want to broadcast them if they turn
-                                // out to be scalars.
+                                // These columns might have different
+                                // lengths from the dataframe, but
+                                // they are only temporaries that will
+                                // be removed by the evaluation of the
+                                // default_exprs and the subsequent
+                                // projection.
                                 should_broadcast: false,
                             },
                         )
@@ -839,7 +837,20 @@ impl RewritingVisitor for CommonSubExprOptimizer {
                     let input = *input;
 
                     let lp = IRBuilder::new(input, &mut arena.1, &mut arena.0)
-                        .with_columns(exprs.cse_exprs().to_vec(), options)
+                        .with_columns(
+                            exprs.cse_exprs().to_vec(),
+                            // These columns might have different
+                            // lengths from the dataframe, but they
+                            // are only temporaries that will be
+                            // removed by the evaluation of the
+                            // default_exprs and the subsequent
+                            // projection.
+                            ProjectionOptions {
+                                run_parallel: options.run_parallel,
+                                duplicate_check: options.duplicate_check,
+                                should_broadcast: false,
+                            },
+                        )
                         .with_columns(exprs.default_exprs().to_vec(), options)
                         .build();
                     let input = arena.0.add(lp);

@@ -20,10 +20,12 @@ rand = { workspace = true }
 rayon = { workspace = true }
 recursive = { workspace = true }
 slotmap = { workspace = true }
+tokio = { workspace = true }
 
 polars-core = { workspace = true }
 polars-error = { workspace = true }
 polars-expr = { workspace = true }
+polars-mem-engine = { workspace = true }
 polars-plan = { workspace = true }
 
 [build-dependencies]

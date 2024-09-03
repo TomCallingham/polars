@@ -25,6 +25,7 @@ polars-utils = { workspace = true }
 
 ahash = { workspace = true }
 arrow = { workspace = true }
+bitflags = { workspace = true }
 bytemuck = { workspace = true }
 chrono = { workspace = true, optional = true }
 chrono-tz = { workspace = true, optional = true }
@@ -32,6 +33,7 @@ ciborium = { workspace = true, optional = true }
 either = { workspace = true }
 futures = { workspace = true, optional = true }
 hashbrown = { workspace = true }
+memmap = { workspace = true }
 once_cell = { workspace = true }
 percent-encoding = { workspace = true }
 pyo3 = { workspace = true, optional = true }
@@ -39,6 +41,7 @@ rayon = { workspace = true }
 recursive = { workspace = true }
 regex = { workspace = true, optional = true }
 serde = { workspace = true, features = ["rc"], optional = true }
+serde_json = { workspace = true, optional = true }
 smartstring = { workspace = true }
 strum_macros = { workspace = true }
 
@@ -66,6 +69,7 @@ ipc = ["polars-io/ipc"]
 json = ["polars-io/json", "polars-json"]
 csv = ["polars-io/csv"]
 temporal = [
+  "chrono",
   "polars-core/temporal",
   "polars-core/dtype-date",
   "polars-core/dtype-datetime",
@@ -84,11 +88,7 @@ dtype-i16 = ["polars-core/dtype-i16"]
 dtype-decimal = ["polars-core/dtype-decimal"]
 dtype-date = ["polars-time/dtype-date", "temporal"]
 dtype-datetime = ["polars-time/dtype-datetime", "temporal"]
-dtype-duration = [
-  "polars-core/dtype-duration",
-  "polars-time/dtype-duration",
-  "temporal",
-]
+dtype-duration = ["polars-core/dtype-duration", "polars-time/dtype-duration", "temporal", "polars-ops/dtype-duration"]
 dtype-time = ["polars-time/dtype-time", "temporal"]
 dtype-array = ["polars-core/dtype-array", "polars-ops/dtype-array"]
 dtype-categorical = ["polars-core/dtype-categorical"]
@@ -196,12 +196,12 @@ month_end = ["polars-time/month_end"]
 offset_by = ["polars-time/offset_by"]
 
 bigidx = ["polars-core/bigidx"]
+polars_cloud = ["serde", "ciborium"]
 
 panic_on_schema = []
 
 [package.metadata.docs.rs]
 features = [
-  "approx_n_unique",
   "temporal",
   "serde",
   "rolling_window",

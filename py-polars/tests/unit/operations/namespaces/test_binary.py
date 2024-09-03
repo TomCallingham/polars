@@ -1,8 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
 
 import polars as pl
 from polars.testing import assert_frame_equal
-from polars.type_aliases import TransferEncoding
+
+if TYPE_CHECKING:
+    from polars._typing import SizeUnit, TransferEncoding
 
 
 def test_binary_conversions() -> None:
@@ -96,54 +102,65 @@ def test_starts_ends_with() -> None:
 def test_base64_encode() -> None:
     df = pl.DataFrame({"data": [b"asd", b"qwe"]})
 
-    assert ["YXNk", "cXdl"] == df["data"].bin.encode("base64").to_list()
+    assert df["data"].bin.encode("base64").to_list() == ["YXNk", "cXdl"]
 
 
 def test_base64_decode() -> None:
     df = pl.DataFrame({"data": [b"YXNk", b"cXdl"]})
 
-    assert [b"asd", b"qwe"] == df["data"].bin.decode("base64").to_list()
+    assert df["data"].bin.decode("base64").to_list() == [b"asd", b"qwe"]
 
 
 def test_hex_encode() -> None:
     df = pl.DataFrame({"data": [b"asd", b"qwe"]})
 
-    assert ["617364", "717765"] == df["data"].bin.encode("hex").to_list()
+    assert df["data"].bin.encode("hex").to_list() == ["617364", "717765"]
 
 
 def test_hex_decode() -> None:
     df = pl.DataFrame({"data": [b"617364", b"717765"]})
 
-    assert [b"asd", b"qwe"] == df["data"].bin.decode("hex").to_list()
+    assert df["data"].bin.decode("hex").to_list() == [b"asd", b"qwe"]
 
 
 @pytest.mark.parametrize(
     "encoding",
-    [
-        "hex",
-        "base64",
-    ],
+    ["hex", "base64"],
 )
 def test_compare_encode_between_lazy_and_eager_6814(encoding: TransferEncoding) -> None:
     df = pl.DataFrame({"x": [b"aa", b"bb", b"cc"]})
     expr = pl.col("x").bin.encode(encoding)
+
     result_eager = df.select(expr)
     dtype = result_eager["x"].dtype
+
     result_lazy = df.lazy().select(expr).select(pl.col(dtype)).collect()
     assert_frame_equal(result_eager, result_lazy)
 
 
 @pytest.mark.parametrize(
     "encoding",
-    [
-        "hex",
-        "base64",
-    ],
+    ["hex", "base64"],
 )
 def test_compare_decode_between_lazy_and_eager_6814(encoding: TransferEncoding) -> None:
     df = pl.DataFrame({"x": [b"d3d3", b"abcd", b"1234"]})
     expr = pl.col("x").bin.decode(encoding)
+
     result_eager = df.select(expr)
     dtype = result_eager["x"].dtype
+
     result_lazy = df.lazy().select(expr).select(pl.col(dtype)).collect()
     assert_frame_equal(result_eager, result_lazy)
+
+
+@pytest.mark.parametrize(
+    ("sz", "unit", "expected"),
+    [(128, "b", 128), (512, "kb", 0.5), (131072, "mb", 0.125)],
+)
+def test_binary_size(sz: int, unit: SizeUnit, expected: int | float) -> None:
+    df = pl.DataFrame({"data": [b"\x00" * sz]}, schema={"data": pl.Binary})
+    for sz in (
+        df.select(sz=pl.col("data").bin.size(unit)).item(),  # expr
+        df["data"].bin.size(unit).item(),  # series
+    ):
+        assert sz == expected

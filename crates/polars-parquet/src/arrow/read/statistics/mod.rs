@@ -181,11 +181,11 @@ fn make_mutable(data_type: &ArrowDataType, capacity: usize) -> PolarsResult<Box<
             Box::new(MutableNullArray::new(ArrowDataType::Null, 0)) as Box<dyn MutableArray>
         },
         PhysicalType::BinaryView => {
-            Box::new(MutableBinaryViewArray::<[u8]>::with_capacity(capacity))
-                as Box<dyn MutableArray>
+            Box::new(MutablePlBinary::with_capacity(capacity)) as Box<dyn MutableArray>
         },
-        PhysicalType::Utf8View => Box::new(MutableBinaryViewArray::<str>::with_capacity(capacity))
-            as Box<dyn MutableArray>,
+        PhysicalType::Utf8View => {
+            Box::new(MutablePlString::with_capacity(capacity)) as Box<dyn MutableArray>
+        },
         other => {
             polars_bail!(
                 nyi = "deserializing parquet stats from {other:?} is still not implemented"
@@ -329,6 +329,7 @@ fn push(
                 .as_mut_any()
                 .downcast_mut::<struct_::DynMutableStructArray>()
                 .unwrap();
+
             return min
                 .inner
                 .iter_mut()

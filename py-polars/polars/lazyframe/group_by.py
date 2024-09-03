@@ -9,8 +9,8 @@ from polars._utils.wrap import wrap_ldf
 
 if TYPE_CHECKING:
     from polars import DataFrame, LazyFrame
+    from polars._typing import IntoExpr, RollingInterpolationMethod, SchemaDict
     from polars.polars import PyLazyGroupBy
-    from polars.type_aliases import IntoExpr, RollingInterpolationMethod, SchemaDict
 
 
 class LazyGroupBy:
@@ -439,7 +439,7 @@ class LazyGroupBy:
         >>> ldf = pl.DataFrame(
         ...     {
         ...         "a": [1, 2, 2, 3, 4, 5],
-        ...         "b": [0.5, 0.5, 4, 10, 13, 14],
+        ...         "b": [0.5, 0.5, 4, 10, 14, 13],
         ...         "c": [True, True, True, False, False, True],
         ...         "d": ["Apple", "Orange", "Apple", "Apple", "Banana", "Banana"],
         ...     }
@@ -453,7 +453,7 @@ class LazyGroupBy:
         ╞════════╪═════╪══════╪═══════╡
         │ Apple  ┆ 3   ┆ 10.0 ┆ false │
         │ Orange ┆ 2   ┆ 0.5  ┆ true  │
-        │ Banana ┆ 5   ┆ 14.0 ┆ true  │
+        │ Banana ┆ 5   ┆ 13.0 ┆ true  │
         └────────┴─────┴──────┴───────┘
         """
         return self.agg(F.all().last())

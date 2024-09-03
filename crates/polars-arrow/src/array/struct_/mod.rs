@@ -11,6 +11,8 @@ mod mutable;
 pub use mutable::*;
 use polars_error::{polars_bail, PolarsResult};
 
+use crate::compute::utils::combine_validities_and;
+
 /// A [`StructArray`] is a nested [`Array`] with an optional validity representing
 /// multiple [`Array`] with the same number of rows.
 /// # Example
@@ -51,7 +53,13 @@ impl StructArray {
     ) -> PolarsResult<Self> {
         let fields = Self::try_get_fields(&data_type)?;
         if fields.is_empty() {
-            polars_bail!(ComputeError: "a StructArray must contain at least one field")
+            assert!(values.is_empty(), "invalid struct");
+            assert_eq!(validity.map(|v| v.len()).unwrap_or(0), 0, "invalid struct");
+            return Ok(Self {
+                data_type,
+                values,
+                validity: None,
+            });
         }
         if fields.len() != values.len() {
             polars_bail!(ComputeError:"a StructArray must have a number of fields in its DataType equal to the number of child values")
@@ -192,6 +200,21 @@ impl StructArray {
             .for_each(|x| x.slice_unchecked(offset, length));
     }
 
+    /// Set the outer nulls into the inner arrays.
+    pub fn propagate_nulls(&self) -> StructArray {
+        let has_nulls = self.null_count() > 0;
+        let mut out = self.clone();
+        if !has_nulls {
+            return out;
+        };
+
+        for value_arr in &mut out.values {
+            let new_validity = combine_validities_and(self.validity(), value_arr.validity());
+            *value_arr = value_arr.with_validity(new_validity);
+        }
+        out
+    }
+
     impl_sliced!();
 
     impl_mut_validity!();
@@ -203,7 +226,7 @@ impl StructArray {
 impl StructArray {
     #[inline]
     fn len(&self) -> usize {
-        self.values[0].len()
+        self.values.first().map(|arr| arr.len()).unwrap_or(0)
     }
 
     /// The optional validity.

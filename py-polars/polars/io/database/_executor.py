@@ -37,7 +37,7 @@ if TYPE_CHECKING:
         from typing_extensions import Self
 
     from polars import DataFrame
-    from polars.type_aliases import ConnectionOrCursor, Cursor, SchemaDict
+    from polars._typing import ConnectionOrCursor, Cursor, SchemaDict
 
     try:
         from sqlalchemy.sql.expression import Selectable
@@ -162,14 +162,14 @@ class ConnectionExecutor:
             fetch_method = driver_properties["fetch_all"]
             yield getattr(self.result, fetch_method)()
         else:
-            size = batch_size if driver_properties["exact_batch_size"] else None
+            size = [batch_size] if driver_properties["exact_batch_size"] else []
             repeat_batch_calls = driver_properties["repeat_batch_calls"]
             fetchmany_arrow = getattr(self.result, fetch_batches)
             if not repeat_batch_calls:
-                yield from fetchmany_arrow(size)
+                yield from fetchmany_arrow(*size)
             else:
                 while True:
-                    arrow = fetchmany_arrow(size)
+                    arrow = fetchmany_arrow(*size)
                     if not arrow:
                         break
                     yield arrow
@@ -213,6 +213,13 @@ class ConnectionExecutor:
                 if re.match(f"^{driver}$", self.driver_name):
                     if ver := driver_properties["minimum_version"]:
                         self._check_module_version(self.driver_name, ver)
+
+                    if iter_batches and (
+                        driver_properties["exact_batch_size"] and not batch_size
+                    ):
+                        msg = f"Cannot set `iter_batches` for {self.driver_name} without also setting a non-zero `batch_size`"
+                        raise ValueError(msg)  # noqa: TRY301
+
                     frames = (
                         self._apply_overrides(batch, (schema_overrides or {}))
                         if isinstance(batch, DataFrame)
@@ -246,6 +253,12 @@ class ConnectionExecutor:
     ) -> DataFrame | Iterable[DataFrame] | None:
         """Return resultset data row-wise for frame init."""
         from polars import DataFrame
+
+        if iter_batches and not batch_size:
+            msg = (
+                "Cannot set `iter_batches` without also setting a non-zero `batch_size`"
+            )
+            raise ValueError(msg)
 
         if is_async := isinstance(original_result := self.result, Coroutine):
             self.result = _run_async(self.result)
@@ -346,15 +359,18 @@ class ConnectionExecutor:
     @staticmethod
     def _is_alchemy_session(conn: Any) -> bool:
         """Check if the cursor/connection/session object is async."""
-        from sqlalchemy.ext.asyncio import (
-            AsyncSession,
-            async_sessionmaker,
-        )
+        from sqlalchemy.ext.asyncio import AsyncSession
         from sqlalchemy.orm import Session, sessionmaker
 
-        return isinstance(
-            conn, (Session, sessionmaker, AsyncSession, async_sessionmaker)
-        )
+        if isinstance(conn, (AsyncSession, Session, sessionmaker)):
+            return True
+
+        try:
+            from sqlalchemy.ext.asyncio import async_sessionmaker
+
+            return isinstance(conn, async_sessionmaker)
+        except ImportError:
+            return False
 
     def _normalise_cursor(self, conn: Any) -> Cursor:
         """Normalise a connection object such that we have the query executor."""
@@ -368,7 +384,7 @@ class ConnectionExecutor:
                     return conn.engine.raw_connection().cursor()
                 elif conn.engine.driver == "duckdb_engine":
                     self.driver_name = "duckdb"
-                    return conn.engine.raw_connection().driver_connection.c
+                    return conn.engine.raw_connection().driver_connection
                 elif self._is_alchemy_engine(conn):
                     # note: if we create it, we can close it
                     self.can_close_cursor = True
@@ -503,11 +519,6 @@ class ConnectionExecutor:
         if self.result is None:
             msg = "Cannot return a frame before executing a query"
             raise RuntimeError(msg)
-        elif iter_batches and not batch_size:
-            msg = (
-                "Cannot set `iter_batches` without also setting a non-zero `batch_size`"
-            )
-            raise ValueError(msg)
 
         can_close = self.can_close_cursor
 

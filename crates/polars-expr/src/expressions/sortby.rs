@@ -58,10 +58,14 @@ pub(super) fn update_groups_sort_by(
     sort_by_s: &Series,
     options: &SortOptions,
 ) -> PolarsResult<GroupsProxy> {
-    let groups = groups
-        .par_iter()
-        .map(|indicator| sort_by_groups_single_by(indicator, sort_by_s, options))
-        .collect::<PolarsResult<_>>()?;
+    // Will trigger a gather for every group, so rechunk before.
+    let sort_by_s = sort_by_s.rechunk();
+    let groups = POOL.install(|| {
+        groups
+            .par_iter()
+            .map(|indicator| sort_by_groups_single_by(indicator, &sort_by_s, options))
+            .collect::<PolarsResult<_>>()
+    })?;
 
     Ok(GroupsProxy::Idx(groups))
 }
@@ -138,6 +142,7 @@ fn sort_by_groups_multiple_by(
     indicator: GroupsIndicator,
     sort_by_s: &[Series],
     descending: &[bool],
+    nulls_last: &[bool],
     multithreaded: bool,
     maintain_order: bool,
 ) -> PolarsResult<(IdxSize, IdxVec)> {
@@ -151,7 +156,7 @@ fn sort_by_groups_multiple_by(
 
             let options = SortMultipleOptions {
                 descending: descending.to_owned(),
-                nulls_last: vec![false; descending.len()],
+                nulls_last: nulls_last.to_owned(),
                 multithreaded,
                 maintain_order,
             };
@@ -167,7 +172,7 @@ fn sort_by_groups_multiple_by(
 
             let options = SortMultipleOptions {
                 descending: descending.to_owned(),
-                nulls_last: vec![false; descending.len()],
+                nulls_last: nulls_last.to_owned(),
                 multithreaded,
                 maintain_order,
             };
@@ -251,6 +256,7 @@ impl PhysicalExpr for SortByExpr {
     ) -> PolarsResult<AggregationContext<'a>> {
         let mut ac_in = self.input.evaluate_on_groups(df, groups, state)?;
         let descending = prepare_bool_vec(&self.sort_options.descending, self.by.len());
+        let nulls_last = prepare_bool_vec(&self.sort_options.nulls_last, self.by.len());
 
         let mut ac_sort_by = self
             .by
@@ -307,6 +313,7 @@ impl PhysicalExpr for SortByExpr {
                         &sort_by_s,
                         &SortOptions {
                             descending: descending[0],
+                            nulls_last: nulls_last[0],
                             ..Default::default()
                         },
                     )
@@ -326,6 +333,7 @@ impl PhysicalExpr for SortByExpr {
                             indicator,
                             &sort_by_s,
                             &descending,
+                            &nulls_last,
                             self.sort_options.multithreaded,
                             self.sort_options.maintain_order,
                         )

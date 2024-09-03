@@ -14,7 +14,7 @@ from polars.exceptions import PolarsInefficientMapWarning
 from polars.testing import assert_frame_equal
 
 if TYPE_CHECKING:
-    from polars.type_aliases import JoinStrategy
+    from polars._typing import JoinStrategy
 
 pytestmark = pytest.mark.xdist_group("streaming")
 
@@ -188,7 +188,11 @@ def test_streaming_generic_left_and_inner_join_from_disk(tmp_path: Path) -> None
     join_strategies: list[JoinStrategy] = ["left", "inner"]
     for how in join_strategies:
         q = lf0.join(lf1, left_on="id", right_on="id_r", how=how)
-        assert_frame_equal(q.collect(streaming=True), q.collect(streaming=False))
+        assert_frame_equal(
+            q.collect(streaming=True),
+            q.collect(streaming=False),
+            check_row_order=how == "left",
+        )
 
 
 def test_streaming_9776() -> None:

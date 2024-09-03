@@ -161,26 +161,6 @@ impl ExpressionConversionState {
     }
 }
 
-pub fn create_physical_expr_streaming(
-    expr_ir: &ExprIR,
-    expr_arena: &Arena<AExpr>,
-    schema: Option<&SchemaRef>,
-    state: &mut ExpressionConversionState,
-) -> PolarsResult<Arc<dyn PhysicalExpr>> {
-    let phys_expr =
-        create_physical_expr_inner(expr_ir.node(), Context::Default, expr_arena, schema, state)?;
-
-    if let Some(name) = expr_ir.get_alias() {
-        Ok(Arc::new(AliasExpr::new(
-            phys_expr,
-            name.clone(),
-            node_to_expr(expr_ir.node(), expr_arena),
-        )))
-    } else {
-        Ok(phys_expr)
-    }
-}
-
 pub fn create_physical_expr(
     expr_ir: &ExprIR,
     ctxt: Context,
@@ -321,6 +301,7 @@ fn create_physical_expr_inner(
                 rhs,
                 node_to_expr(expression, expr_arena),
                 state.local.has_lit,
+                state.allow_threading,
             )))
         },
         Column(column) => Ok(Arc::new(ColumnExpr::new(
@@ -405,7 +386,7 @@ fn create_physical_expr_inner(
                         I::Std(_, ddof) => GBM::Std(*ddof),
                         I::Var(_, ddof) => GBM::Var(*ddof),
                         I::AggGroups(_) => {
-                            panic!("agg groups expression only supported in aggregation context")
+                            polars_bail!(InvalidOperation: "agg groups expression only supported in aggregation context")
                         },
                     };
 
@@ -495,8 +476,8 @@ fn create_physical_expr_inner(
                     .ok()
             });
 
-            let is_reducing_aggregation =
-                options.returns_scalar && matches!(options.collect_groups, ApplyOptions::GroupWise);
+            let is_reducing_aggregation = options.flags.contains(FunctionFlags::RETURNS_SCALAR)
+                && matches!(options.collect_groups, ApplyOptions::GroupWise);
             // Will be reset in the function so get that here.
             let has_window = state.local.has_window;
             let input = create_physical_expressions_check_state(
@@ -516,7 +497,7 @@ fn create_physical_expr_inner(
                 function.clone(),
                 node_to_expr(expression, expr_arena),
                 *options,
-                true,
+                state.allow_threading,
                 schema.cloned(),
                 output_dtype,
             )))
@@ -533,8 +514,8 @@ fn create_physical_expr_inner(
                     .to_dtype(schema, Context::Default, expr_arena)
                     .ok()
             });
-            let is_reducing_aggregation =
-                options.returns_scalar && matches!(options.collect_groups, ApplyOptions::GroupWise);
+            let is_reducing_aggregation = options.flags.contains(FunctionFlags::RETURNS_SCALAR)
+                && matches!(options.collect_groups, ApplyOptions::GroupWise);
             // Will be reset in the function so get that here.
             let has_window = state.local.has_window;
             let input = create_physical_expressions_check_state(
@@ -554,7 +535,7 @@ fn create_physical_expr_inner(
                 function.clone().into(),
                 node_to_expr(expression, expr_arena),
                 *options,
-                true,
+                state.allow_threading,
                 schema.cloned(),
                 output_dtype,
             )))
@@ -594,12 +575,6 @@ fn create_physical_expr_inner(
                 name.clone(),
                 node_to_expr(*input, expr_arena),
             )))
-        },
-        Wildcard => {
-            polars_bail!(ComputeError: "wildcard column selection not supported at this point")
-        },
-        Nth(n) => {
-            polars_bail!(ComputeError: "nth column selection not supported at this point (n={})", n)
         },
     }
 }

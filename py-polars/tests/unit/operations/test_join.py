@@ -18,7 +18,7 @@ from polars.exceptions import (
 from polars.testing import assert_frame_equal, assert_series_equal
 
 if TYPE_CHECKING:
-    from polars.type_aliases import JoinStrategy
+    from polars._typing import JoinStrategy
 
 
 def test_semi_anti_join() -> None:
@@ -514,17 +514,14 @@ def test_update() -> None:
     assert_frame_equal(a, c)
 
     # check behaviour of 'how' param
-    assert [1, 2, 3] == list(
-        a.update(b, left_on="a", right_on="c").collect().to_series()
-    )
-    assert [1, 3] == list(
-        a.update(b, how="inner", left_on="a", right_on="c").collect().to_series()
-    )
-    print(a, b)
-    print(a.update(b.rename({"b": "a"}), how="full", on="a").collect())
-    assert [1, 2, 3, 4, 5] == sorted(
-        a.update(b.rename({"b": "a"}), how="full", on="a").collect().to_series()
-    )
+    result = a.update(b, left_on="a", right_on="c")
+    assert result.collect().to_series().to_list() == [1, 2, 3]
+
+    result = a.update(b, how="inner", left_on="a", right_on="c")
+    assert result.collect().to_series().to_list() == [1, 3]
+
+    result = a.update(b.rename({"b": "a"}), how="full", on="a")
+    assert result.collect().to_series().sort().to_list() == [1, 2, 3, 4, 5]
 
     # check behavior of include_nulls=True
     df = pl.DataFrame(
@@ -551,7 +548,7 @@ def test_update() -> None:
     # edge-case #11684
     x = pl.DataFrame({"a": [0, 1]})
     y = pl.DataFrame({"a": [2, 3]})
-    assert [0, 1, 2, 3] == sorted(x.update(y, on="a", how="full")["a"].to_list())
+    assert sorted(x.update(y, on="a", how="full")["a"].to_list()) == [0, 1, 2, 3]
 
     # disallowed join strategies
     for join_strategy in ("cross", "anti", "semi"):
@@ -791,8 +788,7 @@ def test_join_on_wildcard_error() -> None:
     df = pl.DataFrame({"x": [1]})
     df2 = pl.DataFrame({"x": [1], "y": [2]})
     with pytest.raises(
-        ComputeError,
-        match="wildcard column selection not supported at this point",
+        InvalidOperationError,
     ):
         df.join(df2, on=pl.all())
 
@@ -801,8 +797,7 @@ def test_join_on_nth_error() -> None:
     df = pl.DataFrame({"x": [1]})
     df2 = pl.DataFrame({"x": [1], "y": [2]})
     with pytest.raises(
-        ComputeError,
-        match=r"nth column selection not supported at this point \(n=0\)",
+        InvalidOperationError,
     ):
         df.join(df2, on=pl.first())
 
@@ -997,3 +992,47 @@ def test_join_empty_literal_17027() -> None:
         .height
         == 1
     )
+
+
+@pytest.mark.parametrize(
+    ("left_on", "right_on"),
+    zip(
+        [pl.col("a"), pl.col("a").sort(), [pl.col("a"), pl.col("b")]],
+        [pl.col("a").slice(0, 2) * 2, pl.col("b"), [pl.col("a"), pl.col("b").head()]],
+    ),
+)
+def test_join_non_elementwise_keys_raises(left_on: pl.Expr, right_on: pl.Expr) -> None:
+    # https://github.com/pola-rs/polars/issues/17184
+    left = pl.LazyFrame({"a": [1, 2, 3], "b": [3, 4, 5]})
+    right = pl.LazyFrame({"a": [1, 2, 3], "b": [3, 4, 5]})
+
+    q = left.join(
+        right,
+        left_on=left_on,
+        right_on=right_on,
+        how="inner",
+    )
+
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        q.collect()
+
+
+def test_join_coalesce_not_supported_warning() -> None:
+    # https://github.com/pola-rs/polars/issues/17184
+    left = pl.LazyFrame({"a": [1, 2, 3], "b": [3, 4, 5]})
+    right = pl.LazyFrame({"a": [1, 2, 3], "b": [3, 4, 5]})
+
+    q = left.join(
+        right,
+        left_on=[pl.col("a") * 2],
+        right_on=[pl.col("a") * 2],
+        how="inner",
+        coalesce=True,
+    )
+    with pytest.warns(UserWarning, match="turning off key coalescing"):
+        got = q.collect()
+    expect = pl.DataFrame(
+        {"a": [1, 2, 3], "b": [3, 4, 5], "a_right": [1, 2, 3], "b_right": [3, 4, 5]}
+    )
+
+    assert_frame_equal(expect, got, check_row_order=False)

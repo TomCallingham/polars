@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from datetime import date, datetime, time
 
     from polars import Expr, Series
-    from polars.type_aliases import (
+    from polars._typing import (
         IntoExpr,
         IntoExprColumn,
         NullBehavior,
@@ -1005,7 +1005,7 @@ class ExprListNameSpace:
 
         See Also
         --------
-        ExprNameSpace.reshape: Reshape this Expr to a flat Series or a Series of Lists.
+        Expr.reshape: Reshape this Expr to a flat Series or a Series of Lists.
 
         Examples
         --------

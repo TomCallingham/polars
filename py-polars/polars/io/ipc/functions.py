@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Sequence
 
 import polars._reexport as pl
+import polars.functions as F
 from polars._utils.deprecation import deprecate_renamed_parameter
 from polars._utils.various import (
     is_str_sequence,
@@ -19,7 +21,6 @@ from polars.io._utils import (
     parse_row_index_args,
     prepare_file_arg,
 )
-from polars.io.ipc.anonymous_scan import _scan_ipc_fsspec
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import PyDataFrame, PyLazyFrame
@@ -27,6 +28,7 @@ with contextlib.suppress(ImportError):  # Module not available when building doc
 
 if TYPE_CHECKING:
     from polars import DataFrame, DataType, LazyFrame
+    from polars._typing import SchemaDict
 
 
 @deprecate_renamed_parameter("row_count_name", "row_index_name", version="0.20.4")
@@ -56,6 +58,8 @@ def read_ipc(
         that have a `read()` method, such as a file handler like the builtin `open`
         function, or a `BytesIO` instance). If `fsspec` is installed, it will be used
         to open remote files.
+        For file-like objects,
+        stream position may not be updated accordingly after reading.
     columns
         Columns to select. Accepts a list of column indices (starting at zero) or a list
         of column names.
@@ -90,6 +94,42 @@ def read_ipc(
     That means that you cannot write to the same filename.
     E.g. `pl.read_ipc("my_file.arrow").write_ipc("my_file.arrow")` will fail.
     """
+    if (
+        # Check that it is not a BytesIO object
+        isinstance(v := source, (str, Path))
+    ) and (
+        # HuggingFace only for now ⊂( ◜◒◝ )⊃
+        (is_hf := str(v).startswith("hf://"))
+        # Also dispatch on FORCE_ASYNC, so that this codepath gets run
+        # through by our test suite during CI.
+        or os.getenv("POLARS_FORCE_ASYNC") == "1"
+        # TODO: Dispatch all paths to `scan_ipc` - this will need a breaking
+        # change to the `storage_options` parameter.
+    ):
+        if is_hf and use_pyarrow:
+            msg = "`use_pyarrow=True` is not supported for Hugging Face"
+            raise ValueError(msg)
+
+        lf = scan_ipc(
+            source,  # type: ignore[arg-type]
+            n_rows=n_rows,
+            memory_map=memory_map,
+            storage_options=storage_options,
+            row_index_name=row_index_name,
+            row_index_offset=row_index_offset,
+            rechunk=rechunk,
+        )
+
+        if columns:
+            if isinstance(columns[0], int):
+                lf = lf.select(F.nth(columns))  # type: ignore[arg-type]
+            else:
+                lf = lf.select(columns)
+
+        df = lf.collect()
+
+        return df
+
     if use_pyarrow and n_rows and not memory_map:
         msg = "`n_rows` cannot be used with `use_pyarrow=True` and `memory_map=False`"
         raise ValueError(msg)
@@ -199,6 +239,8 @@ def read_ipc_stream(
         that have a `read()` method, such as a file handler like the builtin `open`
         function, or a `BytesIO` instance). If `fsspec` is installed, it will be used
         to open remote files.
+        For file-like objects,
+        stream position may not be updated accordingly after reading.
     columns
         Columns to select. Accepts a list of column indices (starting at zero) or a list
         of column names.
@@ -287,6 +329,8 @@ def read_ipc_schema(source: str | Path | IO[bytes] | bytes) -> dict[str, DataTyp
         Path to a file or a file-like object (by "file-like object" we refer to objects
         that have a `read()` method, such as a file handler like the builtin `open`
         function, or a `BytesIO` instance).
+        For file-like objects,
+        stream position may not be updated accordingly after reading.
 
     Returns
     -------
@@ -311,8 +355,12 @@ def scan_ipc(
     row_index_offset: int = 0,
     storage_options: dict[str, Any] | None = None,
     memory_map: bool = True,
-    retries: int = 0,
+    retries: int = 2,
     file_cache_ttl: int | None = None,
+    hive_partitioning: bool | None = None,
+    hive_schema: SchemaDict | None = None,
+    try_parse_hive_dates: bool = True,
+    include_file_paths: str | None = None,
 ) -> LazyFrame:
     """
     Lazily read from an Arrow IPC (Feather v2) file or multiple files via glob patterns.
@@ -323,7 +371,9 @@ def scan_ipc(
     Parameters
     ----------
     source
-        Path to a IPC file.
+        Path(s) to a file or directory
+        When needing to authenticate for scanning cloud locations, see the
+        `storage_options` parameter.
     n_rows
         Stop reading from IPC file after reading `n_rows`.
     cache
@@ -336,9 +386,19 @@ def scan_ipc(
     row_index_offset
         Offset to start the row index column (only use if the name is set)
     storage_options
-        Extra options that make sense for `fsspec.open()` or a
-        particular storage connection.
-        e.g. host, port, username, password, etc.
+        Options that indicate how to connect to a cloud provider.
+
+        The cloud providers currently supported are AWS, GCP, and Azure.
+        See supported keys here:
+
+        * `aws <https://docs.rs/object_store/latest/object_store/aws/enum.AmazonS3ConfigKey.html>`_
+        * `gcp <https://docs.rs/object_store/latest/object_store/gcp/enum.GoogleConfigKey.html>`_
+        * `azure <https://docs.rs/object_store/latest/object_store/azure/enum.AzureConfigKey.html>`_
+        * Hugging Face (`hf://`): Accepts an API key under the `token` parameter: \
+          `{'token': '...'}`, or by setting the `HF_TOKEN` environment variable.
+
+        If `storage_options` is not provided, Polars will try to infer the information
+        from environment variables.
     memory_map
         Try to memory map the file. This can greatly improve performance on repeated
         queries as the OS may cache pages.
@@ -349,27 +409,31 @@ def scan_ipc(
         Amount of time to keep downloaded cloud files since their last access time,
         in seconds. Uses the `POLARS_FILE_CACHE_TTL` environment variable
         (which defaults to 1 hour) if not given.
+    hive_partitioning
+        Infer statistics and schema from Hive partitioned URL and use them
+        to prune reads. This is unset by default (i.e. `None`), meaning it is
+        automatically enabled when a single directory is passed, and otherwise
+        disabled.
+    hive_schema
+        The column names and data types of the columns by which the data is partitioned.
+        If set to `None` (default), the schema of the Hive partitions is inferred.
 
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+    try_parse_hive_dates
+        Whether to try parsing hive values as date/datetime types.
+    include_file_paths
+        Include the path of the source file(s) as a column with this name.
     """
     if isinstance(source, (str, Path)):
-        can_use_fsspec = True
         source = normalize_filepath(source, check_not_directory=False)
         sources = []
     else:
-        can_use_fsspec = False
         sources = [
             normalize_filepath(source, check_not_directory=False) for source in source
         ]
         source = None  # type: ignore[assignment]
-
-    # try fsspec scanner
-    if can_use_fsspec and not is_local_file(source):  # type: ignore[arg-type]
-        scan = _scan_ipc_fsspec(source, storage_options)  # type: ignore[arg-type]
-        if n_rows:
-            scan = scan.head(n_rows)
-        if row_index_name is not None:
-            scan = scan.with_row_index(row_index_name, row_index_offset)
-        return scan
 
     pylf = PyLazyFrame.new_from_ipc(
         source,
@@ -382,5 +446,9 @@ def scan_ipc(
         cloud_options=storage_options,
         retries=retries,
         file_cache_ttl=file_cache_ttl,
+        hive_partitioning=hive_partitioning,
+        hive_schema=hive_schema,
+        try_parse_hive_dates=try_parse_hive_dates,
+        include_file_paths=include_file_paths,
     )
     return wrap_ldf(pylf)

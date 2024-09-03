@@ -40,7 +40,7 @@ fn get_spill_dir(operation_name: &'static str) -> PolarsResult<PathBuf> {
     let id = uuid::Uuid::new_v4();
 
     let mut dir = std::path::PathBuf::from(get_base_temp_dir());
-    dir.push(&format!("polars/{operation_name}/{id}"));
+    dir.push(format!("polars/{operation_name}/{id}"));
 
     if !dir.exists() {
         fs::create_dir_all(&dir).map_err(|err| {
@@ -77,7 +77,7 @@ fn gc_thread(operation_name: &'static str, rx: Receiver<PathBuf>) {
     let _ = std::thread::spawn(move || {
         // First clean all existing
         let mut dir = std::path::PathBuf::from(get_base_temp_dir());
-        dir.push(&format!("polars/{operation_name}"));
+        dir.push(format!("polars/{operation_name}"));
 
         // if the directory does not exist, there is nothing to clean
         let rd = match std::fs::read_dir(&dir) {
@@ -177,7 +177,7 @@ impl IOThread {
                         path.push(format!("{count}.ipc"));
 
                         let file = File::create(path).unwrap();
-                        let writer = IpcWriter::new(file).with_pl_flavor(true);
+                        let writer = IpcWriter::new(file).with_compat_level(CompatLevel::newest());
                         let mut writer = writer.batched(&schema).unwrap();
                         writer.write_batch(&df).unwrap();
                         writer.finish().unwrap();
@@ -188,7 +188,7 @@ impl IOThread {
                     path.push(format!("{count}_0_pass.ipc"));
 
                     let file = File::create(path).unwrap();
-                    let writer = IpcWriter::new(file).with_pl_flavor(true);
+                    let writer = IpcWriter::new(file).with_compat_level(CompatLevel::newest());
                     let mut writer = writer.batched(&schema).unwrap();
 
                     for mut df in iter {
@@ -227,7 +227,7 @@ impl IOThread {
             path.push(format!("_{count}_full.ipc"));
 
             let file = File::create(path).unwrap();
-            let mut writer = IpcWriter::new(file).with_pl_flavor(true);
+            let mut writer = IpcWriter::new(file).with_compat_level(CompatLevel::newest());
             writer.finish(&mut df).unwrap();
         } else {
             let iter = Box::new(std::iter::once(df));
@@ -260,7 +260,7 @@ impl IOThread {
         // duplicates
         path.push(format!("_{count}.ipc"));
         let file = File::create(path).unwrap();
-        let writer = IpcWriter::new(file).with_pl_flavor(true);
+        let writer = IpcWriter::new(file).with_compat_level(CompatLevel::newest());
         let mut writer = writer.batched(&self.schema).unwrap();
         writer.write_batch(&df).unwrap();
         writer.finish().unwrap();

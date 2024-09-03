@@ -4,6 +4,7 @@ import io
 import json
 import typing
 from collections import OrderedDict
+from decimal import Decimal as D
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,14 @@ def test_write_json_duration() -> None:
     value = df.write_json()
     expected = '[{"a":"PT91762.939S"},{"a":"PT91762.89S"},{"a":"PT6020.836S"}]'
     assert value == expected
+
+
+def test_write_json_decimal() -> None:
+    df = pl.DataFrame({"a": pl.Series([D("1.00"), D("2.00"), None])})
+
+    # we don't guarantee a format, just round-circling
+    value = df.write_json()
+    assert value == """[{"a":"1.00"},{"a":"2.00"},{"a":null}]"""
 
 
 def test_json_infer_schema_length_11148() -> None:
@@ -146,7 +155,10 @@ def test_ndjson_nested_null() -> None:
 
     # 'bar' represents an empty list of structs; check the schema is correct (eg: picks
     # up that it IS a list of structs), but confirm that list is empty (ref: #11301)
-    assert df.schema == {"foo": pl.Struct([pl.Field("bar", pl.List(pl.Struct([])))])}
+    # We don't support empty structs yet. So Null is closest.
+    assert df.schema == {
+        "foo": pl.Struct([pl.Field("bar", pl.List(pl.Struct({"": pl.Null})))])
+    }
     assert df.to_dict(as_series=False) == {"foo": [{"bar": []}]}
 
 
@@ -363,3 +375,13 @@ def test_json_normalize() -> None:
         "fitness.height": [130, 130, 130],
         "fitness.weight": [60, 60, 60],
     }
+
+
+def test_empty_json() -> None:
+    df = pl.read_json(io.StringIO("{}"))
+    assert df.shape == (0, 0)
+    assert isinstance(df, pl.DataFrame)
+
+    df = pl.read_json(b'{"j":{}}')
+    assert df.dtypes == [pl.Struct([])]
+    assert df.shape == (0, 1)

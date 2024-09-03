@@ -1,8 +1,6 @@
 use arrow::array::*;
 
 use crate::prelude::*;
-#[cfg(feature = "dtype-struct")]
-use crate::series::iterator::SeriesIter;
 
 pub mod par;
 
@@ -420,48 +418,6 @@ impl<T: PolarsObject> ObjectChunked<T> {
     }
 }
 
-// Make sure to call `rechunk` first!
-#[cfg(feature = "dtype-struct")]
-impl<'a> IntoIterator for &'a StructChunked {
-    type Item = &'a [AnyValue<'a>];
-    type IntoIter = StructIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        let field_iter = self.fields().iter().map(|s| s.iter()).collect();
-
-        StructIter {
-            field_iter,
-            buf: vec![],
-        }
-    }
-}
-
-#[cfg(feature = "dtype-struct")]
-pub struct StructIter<'a> {
-    field_iter: Vec<SeriesIter<'a>>,
-    buf: Vec<AnyValue<'a>>,
-}
-
-#[cfg(feature = "dtype-struct")]
-impl<'a> Iterator for StructIter<'a> {
-    type Item = &'a [AnyValue<'a>];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.buf.clear();
-
-        for it in &mut self.field_iter {
-            self.buf.push(it.next()?);
-        }
-        // SAFETY:
-        // Lifetime is bound to struct, we just cannot set the lifetime for the iterator trait
-        unsafe {
-            Some(std::mem::transmute::<&'_ [AnyValue], &'a [AnyValue]>(
-                &self.buf,
-            ))
-        }
-    }
-}
-
 /// Wrapper struct to convert an iterator of type `T` into one of type [`Option<T>`].  It is useful to make the
 /// [`IntoIterator`] trait, in which every iterator shall return an [`Option<T>`].
 pub struct SomeIterator<I>(I)
@@ -502,7 +458,7 @@ mod test {
     fn out_of_bounds() {
         let mut a = UInt32Chunked::from_slice("a", &[1, 2, 3]);
         let b = UInt32Chunked::from_slice("a", &[1, 2, 3]);
-        a.append(&b);
+        a.append(&b).unwrap();
 
         let v = a.into_iter().collect::<Vec<_>>();
         assert_eq!(
@@ -668,7 +624,7 @@ mod test {
             fn $test_name() {
                 let mut a = <$ca_type>::from_slice("test", &[$first_val, $second_val]);
                 let a_b = <$ca_type>::from_slice("", &[$third_val]);
-                a.append(&a_b);
+                a.append(&a_b).unwrap();
 
                 // normal iterator
                 let mut it = a.into_iter();
@@ -731,7 +687,7 @@ mod test {
             fn $test_name() {
                 let mut a = <$ca_type>::new("test", &[$first_val, $second_val]);
                 let a_b = <$ca_type>::new("", &[$third_val]);
-                a.append(&a_b);
+                a.append(&a_b).unwrap();
 
                 // normal iterator
                 let mut it = a.into_iter();
@@ -885,7 +841,7 @@ mod test {
             fn $test_name() {
                 let mut a = <$ca_type>::from_slice("test", &[$first_val, $second_val]);
                 let a_b = <$ca_type>::from_slice("", &[$third_val]);
-                a.append(&a_b);
+                a.append(&a_b).unwrap();
 
                 // normal iterator
                 let mut it = a.into_no_null_iter();
@@ -1004,14 +960,14 @@ mod test {
     impl_test_iter_skip!(utf8_iter_many_chunk_skip, 18, Some("0"), Some("9"), {
         let mut a = StringChunked::from_slice("test", &generate_utf8_vec(SKIP_ITERATOR_SIZE));
         let a_b = StringChunked::from_slice("test", &generate_utf8_vec(SKIP_ITERATOR_SIZE));
-        a.append(&a_b);
+        a.append(&a_b).unwrap();
         a
     });
 
     impl_test_iter_skip!(utf8_iter_many_chunk_null_check_skip, 18, Some("0"), None, {
         let mut a = StringChunked::new("test", &generate_opt_utf8_vec(SKIP_ITERATOR_SIZE));
         let a_b = StringChunked::new("test", &generate_opt_utf8_vec(SKIP_ITERATOR_SIZE));
-        a.append(&a_b);
+        a.append(&a_b).unwrap();
         a
     });
 
@@ -1041,14 +997,14 @@ mod test {
     impl_test_iter_skip!(bool_iter_many_chunk_skip, 18, Some(true), Some(false), {
         let mut a = BooleanChunked::from_slice("test", &generate_boolean_vec(SKIP_ITERATOR_SIZE));
         let a_b = BooleanChunked::from_slice("test", &generate_boolean_vec(SKIP_ITERATOR_SIZE));
-        a.append(&a_b);
+        a.append(&a_b).unwrap();
         a
     });
 
     impl_test_iter_skip!(bool_iter_many_chunk_null_check_skip, 18, None, None, {
         let mut a = BooleanChunked::new("test", &generate_opt_boolean_vec(SKIP_ITERATOR_SIZE));
         let a_b = BooleanChunked::new("test", &generate_opt_boolean_vec(SKIP_ITERATOR_SIZE));
-        a.append(&a_b);
+        a.append(&a_b).unwrap();
         a
     });
 }

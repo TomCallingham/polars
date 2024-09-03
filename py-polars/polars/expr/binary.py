@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from polars._utils.parse import parse_into_expression
+from polars._utils.various import scale_bytes
 from polars._utils.wrap import wrap_expr
 
 if TYPE_CHECKING:
     from polars import Expr
-    from polars.type_aliases import IntoExpr, TransferEncoding
+    from polars._typing import IntoExpr, SizeUnit, TransferEncoding
 
 
 class ExprBinaryNameSpace:
@@ -183,22 +184,22 @@ class ExprBinaryNameSpace:
         >>> colors = pl.DataFrame(
         ...     {
         ...         "name": ["black", "yellow", "blue"],
-        ...         "code": [b"\x00\x00\x00", b"\xff\xff\x00", b"\x00\x00\xff"],
+        ...         "encoded": [b"000000", b"ffff00", b"0000ff"],
         ...     }
         ... )
         >>> colors.with_columns(
-        ...     pl.col("code").bin.encode("hex").alias("encoded"),
+        ...     pl.col("encoded").bin.decode("hex").alias("code"),
         ... )
         shape: (3, 3)
-        ┌────────┬─────────────────┬─────────┐
-        │ name   ┆ code            ┆ encoded │
-        │ ---    ┆ ---             ┆ ---     │
-        │ str    ┆ binary          ┆ str     │
-        ╞════════╪═════════════════╪═════════╡
-        │ black  ┆ b"\x00\x00\x00" ┆ 000000  │
-        │ yellow ┆ b"\xff\xff\x00" ┆ ffff00  │
-        │ blue   ┆ b"\x00\x00\xff" ┆ 0000ff  │
-        └────────┴─────────────────┴─────────┘
+        ┌────────┬───────────┬─────────────────┐
+        │ name   ┆ encoded   ┆ code            │
+        │ ---    ┆ ---       ┆ ---             │
+        │ str    ┆ binary    ┆ binary          │
+        ╞════════╪═══════════╪═════════════════╡
+        │ black  ┆ b"000000" ┆ b"\x00\x00\x00" │
+        │ yellow ┆ b"ffff00" ┆ b"\xff\xff\x00" │
+        │ blue   ┆ b"0000ff" ┆ b"\x00\x00\xff" │
+        └────────┴───────────┴─────────────────┘
         """
         if encoding == "hex":
             return wrap_expr(self._pyexpr.bin_hex_decode(strict))
@@ -251,3 +252,40 @@ class ExprBinaryNameSpace:
         else:
             msg = f"`encoding` must be one of {{'hex', 'base64'}}, got {encoding!r}"
             raise ValueError(msg)
+
+    def size(self, unit: SizeUnit = "b") -> Expr:
+        r"""
+        Get the size of binary values in the given unit.
+
+        Parameters
+        ----------
+        unit : {'b', 'kb', 'mb', 'gb', 'tb'}
+            Scale the returned size to the given unit.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`UInt32` or `Float64`.
+
+        Examples
+        --------
+        >>> from os import urandom
+        >>> df = pl.DataFrame({"data": [urandom(n) for n in (512, 256, 1024)]})
+        >>> df.with_columns(  # doctest: +IGNORE_RESULT
+        ...     n_bytes=pl.col("data").bin.size(),
+        ...     n_kilobytes=pl.col("data").bin.size("kb"),
+        ... )
+        shape: (4, 3)
+        ┌─────────────────────────────────┬─────────┬─────────────┐
+        │ data                            ┆ n_bytes ┆ n_kilobytes │
+        │ ---                             ┆ ---     ┆ ---         │
+        │ binary                          ┆ u32     ┆ f64         │
+        ╞═════════════════════════════════╪═════════╪═════════════╡
+        │ b"y?~B\x83\xf4V\x07\xd3\xfb\xb… ┆ 512     ┆ 0.5         │
+        │ b"\xee$4@f\xc14\x07\x8e\x88\x1… ┆ 256     ┆ 0.25        │
+        │ b"\x80\xbd\xb9nEq;2\x99$\xf9\x… ┆ 1024    ┆ 1.0         │
+        └─────────────────────────────────┴─────────┴─────────────┘
+        """
+        sz = wrap_expr(self._pyexpr.bin_size_bytes())
+        sz = scale_bytes(sz, unit)
+        return sz

@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::path::PathBuf;
 
 use arrow::io::ipc::write;
 use arrow::io::ipc::write::WriteOptions;
@@ -8,7 +7,7 @@ use polars_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::prelude::*;
-use crate::shared::{schema_to_arrow_checked, WriterFactory};
+use crate::shared::schema_to_arrow_checked;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -17,6 +16,12 @@ pub struct IpcWriterOptions {
     pub compression: Option<IpcCompression>,
     /// maintain the order the data was processed
     pub maintain_order: bool,
+}
+
+impl IpcWriterOptions {
+    pub fn to_writer<W: Write>(&self, writer: W) -> IpcWriter<W> {
+        IpcWriter::new(writer).with_compression(self.compression)
+    }
 }
 
 /// Write a DataFrame to Arrow's IPC format
@@ -42,7 +47,7 @@ pub struct IpcWriter<W> {
     pub(super) writer: W,
     pub(super) compression: Option<IpcCompression>,
     /// Polars' flavor of arrow. This might be temporary.
-    pub(super) pl_flavor: bool,
+    pub(super) compat_level: CompatLevel,
 }
 
 impl<W: Write> IpcWriter<W> {
@@ -52,13 +57,13 @@ impl<W: Write> IpcWriter<W> {
         self
     }
 
-    pub fn with_pl_flavor(mut self, pl_flavor: bool) -> Self {
-        self.pl_flavor = pl_flavor;
+    pub fn with_compat_level(mut self, compat_level: CompatLevel) -> Self {
+        self.compat_level = compat_level;
         self
     }
 
     pub fn batched(self, schema: &Schema) -> PolarsResult<BatchedWriter<W>> {
-        let schema = schema_to_arrow_checked(schema, self.pl_flavor, "ipc")?;
+        let schema = schema_to_arrow_checked(schema, self.compat_level, "ipc")?;
         let mut writer = write::FileWriter::new(
             self.writer,
             Arc::new(schema),
@@ -71,7 +76,7 @@ impl<W: Write> IpcWriter<W> {
 
         Ok(BatchedWriter {
             writer,
-            pl_flavor: self.pl_flavor,
+            compat_level: self.compat_level,
         })
     }
 }
@@ -84,12 +89,12 @@ where
         IpcWriter {
             writer,
             compression: None,
-            pl_flavor: true,
+            compat_level: CompatLevel::newest(),
         }
     }
 
     fn finish(&mut self, df: &mut DataFrame) -> PolarsResult<()> {
-        let schema = schema_to_arrow_checked(&df.schema(), self.pl_flavor, "ipc")?;
+        let schema = schema_to_arrow_checked(&df.schema(), self.compat_level, "ipc")?;
         let mut ipc_writer = write::FileWriter::try_new(
             &mut self.writer,
             Arc::new(schema),
@@ -99,7 +104,7 @@ where
             },
         )?;
         df.align_chunks();
-        let iter = df.iter_chunks(self.pl_flavor, true);
+        let iter = df.iter_chunks(self.compat_level, true);
 
         for batch in iter {
             ipc_writer.write(&batch, None)?
@@ -111,7 +116,7 @@ where
 
 pub struct BatchedWriter<W: Write> {
     writer: write::FileWriter<W>,
-    pl_flavor: bool,
+    compat_level: CompatLevel,
 }
 
 impl<W: Write> BatchedWriter<W> {
@@ -120,7 +125,7 @@ impl<W: Write> BatchedWriter<W> {
     /// # Panics
     /// The caller must ensure the chunks in the given [`DataFrame`] are aligned.
     pub fn write_batch(&mut self, df: &DataFrame) -> PolarsResult<()> {
-        let iter = df.iter_chunks(self.pl_flavor, true);
+        let iter = df.iter_chunks(self.compat_level, true);
         for batch in iter {
             self.writer.write(&batch, None)?
         }
@@ -151,47 +156,5 @@ impl From<IpcCompression> for write::Compression {
             IpcCompression::LZ4 => write::Compression::LZ4,
             IpcCompression::ZSTD => write::Compression::ZSTD,
         }
-    }
-}
-
-pub struct IpcWriterOption {
-    compression: Option<IpcCompression>,
-    extension: PathBuf,
-}
-
-impl IpcWriterOption {
-    pub fn new() -> Self {
-        Self {
-            compression: None,
-            extension: PathBuf::from(".ipc"),
-        }
-    }
-
-    /// Set the compression used. Defaults to None.
-    pub fn with_compression(mut self, compression: Option<IpcCompression>) -> Self {
-        self.compression = compression;
-        self
-    }
-
-    /// Set the extension. Defaults to ".ipc".
-    pub fn with_extension(mut self, extension: PathBuf) -> Self {
-        self.extension = extension;
-        self
-    }
-}
-
-impl Default for IpcWriterOption {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WriterFactory for IpcWriterOption {
-    fn create_writer<W: Write + 'static>(&self, writer: W) -> Box<dyn SerWriter<W>> {
-        Box::new(IpcWriter::new(writer).with_compression(self.compression))
-    }
-
-    fn extension(&self) -> PathBuf {
-        self.extension.to_owned()
     }
 }

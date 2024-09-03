@@ -13,7 +13,7 @@ impl StringNameSpace {
             }),
             &[pat],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -28,7 +28,7 @@ impl StringNameSpace {
             }),
             &[pat],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -47,15 +47,15 @@ impl StringNameSpace {
             }),
             &[patterns],
             false,
-            false,
+            None,
         )
     }
 
     /// Uses aho-corasick to replace many patterns.
     /// # Arguments
-    /// - `patterns`: an expression that evaluates to an String column
-    /// - `replace_with`: an expression that evaluates to an String column
-    /// - `ascii_case_insensitive`: Enable ASCII-aware case insensitive matching.
+    /// - `patterns`: an expression that evaluates to a String column
+    /// - `replace_with`: an expression that evaluates to a String column
+    /// - `ascii_case_insensitive`: Enable ASCII-aware case-insensitive matching.
     ///   When this option is enabled, searching will be performed without respect to case for
     ///   ASCII letters (a-z and A-Z) only.
     #[cfg(feature = "find_many")]
@@ -71,7 +71,32 @@ impl StringNameSpace {
             }),
             &[patterns, replace_with],
             false,
+            None,
+        )
+    }
+
+    /// Uses aho-corasick to replace many patterns.
+    /// # Arguments
+    /// - `patterns`: an expression that evaluates to a String column
+    /// - `ascii_case_insensitive`: Enable ASCII-aware case-insensitive matching.
+    ///   When this option is enabled, searching will be performed without respect to case for
+    ///   ASCII letters (a-z and A-Z) only.
+    /// - `overlapping`: Whether matches may overlap.
+    #[cfg(feature = "find_many")]
+    pub fn extract_many(
+        self,
+        patterns: Expr,
+        ascii_case_insensitive: bool,
+        overlapping: bool,
+    ) -> Expr {
+        self.0.map_many_private(
+            FunctionExpr::StringExpr(StringFunction::ExtractMany {
+                ascii_case_insensitive,
+                overlapping,
+            }),
+            &[patterns],
             false,
+            None,
         )
     }
 
@@ -81,7 +106,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::EndsWith),
             &[sub],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -91,7 +116,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::StartsWith),
             &[sub],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -127,7 +152,7 @@ impl StringNameSpace {
             StringFunction::Extract(group_index).into(),
             &[pat],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -195,7 +220,7 @@ impl StringNameSpace {
     #[cfg(feature = "string_pad")]
     pub fn zfill(self, length: Expr) -> Expr {
         self.0
-            .map_many_private(StringFunction::ZFill.into(), &[length], false, false)
+            .map_many_private(StringFunction::ZFill.into(), &[length], false, None)
     }
 
     /// Find the index of a literal substring within another string value.
@@ -208,11 +233,11 @@ impl StringNameSpace {
             }),
             &[pat],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
-    /// Find the index of a substring defined by a regular expressons within another string value.
+    /// Find the index of a substring defined by a regular expressions within another string value.
     #[cfg(feature = "regex")]
     pub fn find(self, pat: Expr, strict: bool) -> Expr {
         self.0.map_many_private(
@@ -222,14 +247,14 @@ impl StringNameSpace {
             }),
             &[pat],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
     /// Extract each successive non-overlapping match in an individual string as an array
     pub fn extract_all(self, pat: Expr) -> Expr {
         self.0
-            .map_many_private(StringFunction::ExtractAll.into(), &[pat], false, false)
+            .map_many_private(StringFunction::ExtractAll.into(), &[pat], false, None)
     }
 
     /// Count all successive non-overlapping regex matches.
@@ -238,7 +263,7 @@ impl StringNameSpace {
             StringFunction::CountMatches(literal).into(),
             &[pat],
             false,
-            false,
+            None,
         )
     }
 
@@ -249,7 +274,7 @@ impl StringNameSpace {
             StringFunction::Strptime(dtype, options).into(),
             &[ambiguous],
             false,
-            false,
+            None,
         )
     }
 
@@ -314,7 +339,7 @@ impl StringNameSpace {
                 .into(),
             )
             .with_function_options(|mut options| {
-                options.returns_scalar = true;
+                options.flags |= FunctionFlags::RETURNS_SCALAR;
                 options.collect_groups = ApplyOptions::GroupWise;
                 options
             })
@@ -323,13 +348,13 @@ impl StringNameSpace {
     /// Split the string by a substring. The resulting dtype is `List<String>`.
     pub fn split(self, by: Expr) -> Expr {
         self.0
-            .map_many_private(StringFunction::Split(false).into(), &[by], false, false)
+            .map_many_private(StringFunction::Split(false).into(), &[by], false, None)
     }
 
     /// Split the string by a substring and keep the substring. The resulting dtype is `List<String>`.
     pub fn split_inclusive(self, by: Expr) -> Expr {
         self.0
-            .map_many_private(StringFunction::Split(true).into(), &[by], false, false)
+            .map_many_private(StringFunction::Split(true).into(), &[by], false, None)
     }
 
     #[cfg(feature = "dtype-struct")]
@@ -343,7 +368,7 @@ impl StringNameSpace {
             .into(),
             &[by],
             false,
-            false,
+            None,
         )
     }
 
@@ -355,7 +380,7 @@ impl StringNameSpace {
             StringFunction::SplitExact { n, inclusive: true }.into(),
             &[by],
             false,
-            false,
+            None,
         )
     }
 
@@ -364,7 +389,7 @@ impl StringNameSpace {
     /// keeps the remainder of the string intact. The resulting dtype is [`DataType::Struct`].
     pub fn splitn(self, by: Expr, n: usize) -> Expr {
         self.0
-            .map_many_private(StringFunction::SplitN(n).into(), &[by], false, false)
+            .map_many_private(StringFunction::SplitN(n).into(), &[by], false, None)
     }
 
     #[cfg(feature = "regex")]
@@ -374,7 +399,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Replace { n: 1, literal }),
             &[pat, value],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -385,7 +410,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Replace { n, literal }),
             &[pat, value],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -396,7 +421,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Replace { n: -1, literal }),
             &[pat, value],
             false,
-            true,
+            Some(Default::default()),
         )
     }
 
@@ -407,7 +432,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Reverse),
             &[],
             false,
-            false,
+            None,
         )
     }
 
@@ -417,7 +442,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::StripChars),
             &[matches],
             false,
-            false,
+            None,
         )
     }
 
@@ -427,7 +452,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::StripCharsStart),
             &[matches],
             false,
-            false,
+            None,
         )
     }
 
@@ -437,7 +462,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::StripCharsEnd),
             &[matches],
             false,
-            false,
+            None,
         )
     }
 
@@ -447,7 +472,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::StripPrefix),
             &[prefix],
             false,
-            false,
+            None,
         )
     }
 
@@ -457,7 +482,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::StripSuffix),
             &[suffix],
             false,
-            false,
+            None,
         )
     }
 
@@ -487,7 +512,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::ToInteger(strict)),
             &[base],
             false,
-            false,
+            None,
         )
     }
 
@@ -522,7 +547,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Slice),
             &[offset, length],
             false,
-            false,
+            None,
         )
     }
 
@@ -532,7 +557,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Head),
             &[n],
             false,
-            false,
+            None,
         )
     }
 
@@ -542,14 +567,15 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::Tail),
             &[n],
             false,
-            false,
+            None,
         )
     }
 
     #[cfg(feature = "extract_jsonpath")]
     pub fn json_decode(self, dtype: Option<DataType>, infer_schema_len: Option<usize>) -> Expr {
+        // Apply, because dtype should be inferred only once and be consistent over chunks/morsels.
         self.0
-            .map_private(FunctionExpr::StringExpr(StringFunction::JsonDecode {
+            .apply_private(FunctionExpr::StringExpr(StringFunction::JsonDecode {
                 dtype,
                 infer_schema_len,
             }))
@@ -561,7 +587,7 @@ impl StringNameSpace {
             FunctionExpr::StringExpr(StringFunction::JsonPathMatch),
             &[pat],
             false,
-            false,
+            None,
         )
     }
 }

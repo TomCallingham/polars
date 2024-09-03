@@ -48,7 +48,7 @@ where
 {
     // This implementation differs from pandas as that boundary None's are not removed.
     // This prevents a lot of errors due to expressions leading to different lengths.
-    if !chunked_arr.has_validity() || chunked_arr.null_count() == chunked_arr.len() {
+    if !chunked_arr.has_nulls() || chunked_arr.null_count() == chunked_arr.len() {
         return chunked_arr.clone();
     }
 
@@ -99,7 +99,7 @@ where
         }
 
         let array = PrimitiveArray::new(
-            T::get_dtype().to_arrow(true),
+            T::get_dtype().to_arrow(CompatLevel::newest()),
             out.into(),
             Some(validity.into()),
         );

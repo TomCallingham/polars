@@ -24,6 +24,20 @@ impl SeriesWrap<DecimalChunked> {
         f(&self.0)
     }
 
+    fn scale_factor(&self) -> u128 {
+        10u128.pow(self.0.scale() as u32)
+    }
+
+    fn apply_scale(&self, mut scalar: Scalar) -> Scalar {
+        debug_assert_eq!(scalar.dtype(), &DataType::Float64);
+        let v = scalar
+            .value()
+            .try_extract::<f64>()
+            .expect("should be f64 scalar");
+        scalar.update((v / self.scale_factor() as f64).into());
+        scalar
+    }
+
     fn agg_helper<F: Fn(&Int128Chunked) -> Series>(&self, f: F) -> Series {
         let agg_s = f(&self.0);
         match agg_s.dtype() {
@@ -43,7 +57,8 @@ impl SeriesWrap<DecimalChunked> {
                     Series::from_chunks_and_dtype_unchecked("", vec![arr.values().clone()], dtype)
                 };
                 let new_values = s.array_ref(0).clone();
-                let data_type = ListArray::<i64>::default_datatype(dtype.to_arrow(true));
+                let data_type =
+                    ListArray::<i64>::default_datatype(dtype.to_arrow(CompatLevel::newest()));
                 let new_arr = ListArray::<i64>::new(
                     data_type,
                     arr.offsets().clone(),
@@ -111,12 +126,16 @@ impl private::PrivateSeries for SeriesWrap<DecimalChunked> {
         (&self.0).into_total_ord_inner()
     }
 
-    fn vec_hash(&self, random_state: RandomState, buf: &mut Vec<u64>) -> PolarsResult<()> {
+    fn vec_hash(&self, random_state: PlRandomState, buf: &mut Vec<u64>) -> PolarsResult<()> {
         self.0.vec_hash(random_state, buf)?;
         Ok(())
     }
 
-    fn vec_hash_combine(&self, build_hasher: RandomState, hashes: &mut [u64]) -> PolarsResult<()> {
+    fn vec_hash_combine(
+        &self,
+        build_hasher: PlRandomState,
+        hashes: &mut [u64],
+    ) -> PolarsResult<()> {
         self.0.vec_hash_combine(build_hasher, hashes)?;
         Ok(())
     }
@@ -212,14 +231,14 @@ impl SeriesTrait for SeriesWrap<DecimalChunked> {
     fn append(&mut self, other: &Series) -> PolarsResult<()> {
         polars_ensure!(self.0.dtype() == other.dtype(), append);
         let other = other.decimal()?;
-        self.0.append(&other.0);
+        self.0.append(&other.0)?;
         Ok(())
     }
 
     fn extend(&mut self, other: &Series) -> PolarsResult<()> {
         polars_ensure!(self.0.dtype() == other.dtype(), extend);
         let other = other.decimal()?;
-        self.0.extend(&other.0);
+        self.0.extend(&other.0)?;
         Ok(())
     }
 
@@ -307,8 +326,8 @@ impl SeriesTrait for SeriesWrap<DecimalChunked> {
         self.0.null_count()
     }
 
-    fn has_validity(&self) -> bool {
-        self.0.has_validity()
+    fn has_nulls(&self) -> bool {
+        self.0.has_nulls()
     }
 
     fn is_null(&self) -> BooleanChunked {
@@ -369,6 +388,35 @@ impl SeriesTrait for SeriesWrap<DecimalChunked> {
             Scalar::new(self.dtype().clone(), av)
         }))
     }
+
+    fn mean(&self) -> Option<f64> {
+        self.0.mean().map(|v| v / self.scale_factor() as f64)
+    }
+
+    fn median(&self) -> Option<f64> {
+        self.0.median().map(|v| v / self.scale_factor() as f64)
+    }
+    fn median_reduce(&self) -> PolarsResult<Scalar> {
+        Ok(self.apply_scale(self.0.median_reduce()))
+    }
+
+    fn std(&self, ddof: u8) -> Option<f64> {
+        self.0.std(ddof).map(|v| v / self.scale_factor() as f64)
+    }
+    fn std_reduce(&self, ddof: u8) -> PolarsResult<Scalar> {
+        Ok(self.apply_scale(self.0.std_reduce(ddof)))
+    }
+
+    fn quantile_reduce(
+        &self,
+        quantile: f64,
+        interpol: QuantileInterpolOptions,
+    ) -> PolarsResult<Scalar> {
+        self.0
+            .quantile_reduce(quantile, interpol)
+            .map(|v| self.apply_scale(v))
+    }
+
     fn as_any(&self) -> &dyn Any {
         &self.0
     }

@@ -5,7 +5,7 @@ use std::cell::{Cell, UnsafeCell};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker as WorkQueue};
@@ -34,18 +34,31 @@ slotmap::new_key_type! {
     struct TaskKey;
 }
 
-/// Metadata associated with a task to help schedule it and clean it up.
-struct TaskMetadata {
-    priority: bool,
+/// High priority tasks are scheduled preferentially over low priority tasks.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskPriority {
+    Low,
+    High,
+}
 
+/// Metadata associated with a task to help schedule it and clean it up.
+struct ScopedTaskMetadata {
     task_key: TaskKey,
     completed_tasks: Weak<Mutex<Vec<TaskKey>>>,
 }
 
+struct TaskMetadata {
+    priority: TaskPriority,
+    freshly_spawned: AtomicBool,
+    scoped: Option<ScopedTaskMetadata>,
+}
+
 impl Drop for TaskMetadata {
     fn drop(&mut self) {
-        if let Some(completed_tasks) = self.completed_tasks.upgrade() {
-            completed_tasks.lock().push(self.task_key);
+        if let Some(scoped) = &self.scoped {
+            if let Some(completed_tasks) = scoped.completed_tasks.upgrade() {
+                completed_tasks.lock().push(scoped.task_key);
+            }
         }
     }
 }
@@ -75,12 +88,29 @@ struct Executor {
 impl Executor {
     fn schedule_task(&self, task: ReadyTask) {
         let thread = TLS_THREAD_ID.get();
-        let priority = task.metadata().priority;
-        if let Some(ttl) = self.thread_task_lists.get(thread) {
+        let meta = task.metadata();
+        let opt_ttl = self.thread_task_lists.get(thread);
+
+        let mut use_global_queue = opt_ttl.is_none();
+        if meta.freshly_spawned.load(Ordering::Relaxed) {
+            use_global_queue = true;
+            meta.freshly_spawned.store(false, Ordering::Relaxed);
+        }
+
+        if use_global_queue {
+            // Scheduled from an unknown thread, add to global queue.
+            if meta.priority == TaskPriority::High {
+                self.global_high_prio_task_queue.push(task);
+            } else {
+                self.global_low_prio_task_queue.push(task);
+            }
+            self.park_group.unpark_one();
+        } else {
+            let ttl = opt_ttl.unwrap();
             // SAFETY: this slot may only be accessed from the local thread, which we are.
             let slot = unsafe { &mut *ttl.local_slot.get() };
 
-            if priority {
+            if meta.priority == TaskPriority::High {
                 // Insert new task into thread local slot, taking out the old task.
                 let Some(task) = slot.replace(task) else {
                     // We pushed a task into our local slot which was empty. Since
@@ -100,14 +130,6 @@ impl Executor {
                     self.park_group.unpark_one();
                 }
             }
-        } else {
-            // Scheduled from an unknown thread, add to global queue.
-            if priority {
-                self.global_high_prio_task_queue.push(task);
-            } else {
-                self.global_low_prio_task_queue.push(task);
-            }
-            self.park_group.unpark_one();
         }
     }
 
@@ -206,7 +228,10 @@ impl Executor {
 
             let thread_task_lists = (0..n_threads)
                 .map(|t| {
-                    std::thread::spawn(move || Self::global().runner(t));
+                    std::thread::Builder::new()
+                        .name(format!("async-executor-{t}"))
+                        .spawn(move || Self::global().runner(t))
+                        .unwrap();
 
                     let high_prio_tasks = WorkQueue::new_lifo();
                     CachePadded::new(ThreadLocalTaskList {
@@ -257,7 +282,7 @@ impl<'scope, 'env> TaskScope<'scope, 'env> {
 
     pub fn spawn_task<F: Future + Send + 'scope>(
         &self,
-        priority: bool,
+        priority: TaskPriority,
         fut: F,
     ) -> JoinHandle<F::Output>
     where
@@ -276,9 +301,12 @@ impl<'scope, 'env> TaskScope<'scope, 'env> {
                     fut,
                     on_wake,
                     TaskMetadata {
-                        task_key,
                         priority,
-                        completed_tasks: Arc::downgrade(&self.completed_tasks),
+                        freshly_spawned: AtomicBool::new(true),
+                        scoped: Some(ScopedTaskMetadata {
+                            task_key,
+                            completed_tasks: Arc::downgrade(&self.completed_tasks),
+                        }),
                     },
                 )
             };
@@ -315,6 +343,26 @@ where
         Err(e) => std::panic::resume_unwind(e),
         Ok(result) => result,
     }
+}
+
+#[allow(unused)]
+pub fn spawn<F: Future + Send + 'static>(priority: TaskPriority, fut: F) -> JoinHandle<F::Output>
+where
+    <F as Future>::Output: Send + 'static,
+{
+    let executor = Executor::global();
+    let on_wake = move |task| executor.schedule_task(task);
+    let (runnable, join_handle) = task::spawn(
+        fut,
+        on_wake,
+        TaskMetadata {
+            priority,
+            freshly_spawned: AtomicBool::new(true),
+            scoped: None,
+        },
+    );
+    runnable.schedule();
+    join_handle
 }
 
 fn random_permutation<R: Rng>(len: u32, rng: &mut R) -> impl Iterator<Item = u32> {

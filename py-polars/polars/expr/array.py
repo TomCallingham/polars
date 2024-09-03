@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from datetime import date, datetime, time
 
     from polars import Expr
-    from polars.type_aliases import IntoExpr, IntoExprColumn
+    from polars._typing import IntoExpr, IntoExprColumn
 
 
 class ExprArrayNameSpace:
@@ -512,7 +512,7 @@ class ExprArrayNameSpace:
         Examples
         --------
         >>> df = pl.DataFrame(
-        ...     {"a": [[1, 2, 3], [4, 5, 6], [7, 8, 9]]},
+        ...     {"a": [[1, 2, 3], [4, 5, 6], [7, 9, 8]]},
         ...     schema={"a": pl.Array(pl.Int32, 3)},
         ... )
         >>> df.with_columns(last=pl.col("a").arr.last())
@@ -524,7 +524,7 @@ class ExprArrayNameSpace:
         ╞═══════════════╪══════╡
         │ [1, 2, 3]     ┆ 3    │
         │ [4, 5, 6]     ┆ 6    │
-        │ [7, 8, 9]     ┆ 9    │
+        │ [7, 9, 8]     ┆ 8    │
         └───────────────┴──────┘
 
         """

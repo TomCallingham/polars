@@ -15,7 +15,7 @@ from polars.testing.parametric.strategies import series
 from polars.testing.parametric.strategies.data import datetimes
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 @pytest.mark.parametrize(
@@ -171,6 +171,17 @@ def test_lit_decimal() -> None:
 
     assert df.dtypes[0] == pl.Decimal(None, 1)
     assert result == value
+
+
+def test_lit_string_float() -> None:
+    value = 3.2
+
+    expr = pl.lit(value, dtype=pl.Utf8)
+    df = pl.select(expr)
+    result = df.item()
+
+    assert df.dtypes[0] == pl.String
+    assert result == str(value)
 
 
 @given(s=series(min_size=1, max_size=1, allow_null=False, allowed_dtypes=pl.Decimal))

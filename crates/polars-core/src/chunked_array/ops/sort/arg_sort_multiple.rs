@@ -1,7 +1,7 @@
 use arrow::compute::utils::combine_validities_and_many;
 use compare_inner::NullOrderCmp;
 use polars_row::{convert_columns, EncodingField, RowsEncoded};
-use polars_utils::iter::EnumerateIdxTrait;
+use polars_utils::itertools::Itertools;
 
 use super::*;
 use crate::utils::_split_offsets;
@@ -9,15 +9,16 @@ use crate::utils::_split_offsets;
 pub(crate) fn args_validate<T: PolarsDataType>(
     ca: &ChunkedArray<T>,
     other: &[Series],
-    descending: &[bool],
+    param_value: &[bool],
+    param_name: &str,
 ) -> PolarsResult<()> {
     for s in other {
         assert_eq!(ca.len(), s.len());
     }
-    polars_ensure!(other.len() == (descending.len() - 1),
+    polars_ensure!(other.len() == (param_value.len() - 1),
         ComputeError:
-        "the amount of ordering booleans: {} does not match the number of series: {}",
-        descending.len(), other.len() + 1,
+        "the length of `{}` ({}) does not match the number of series ({})",
+        param_name, param_value.len(), other.len() + 1,
     );
     Ok(())
 }
@@ -94,12 +95,13 @@ pub fn _get_rows_encoded_compat_array(by: &Series) -> PolarsResult<ArrayRef> {
         DataType::Categorical(_, _) | DataType::Enum(_, _) => {
             let ca = by.categorical().unwrap();
             if ca.uses_lexical_ordering() {
-                by.to_arrow(0, true)
+                by.to_arrow(0, CompatLevel::newest())
             } else {
                 ca.physical().chunks[0].clone()
             }
         },
-        _ => by.to_arrow(0, true),
+        // Take physical
+        _ => by.chunks()[0].clone(),
     };
     Ok(out)
 }
@@ -208,8 +210,9 @@ pub fn _get_rows_encoded(
             // Flatten the struct fields.
             ArrowDataType::Struct(_) => {
                 let arr = arr.as_any().downcast_ref::<StructArray>().unwrap();
-                for arr in arr.values() {
-                    cols.push(arr.clone() as ArrayRef);
+                let arr = arr.propagate_nulls();
+                for value_arr in arr.values() {
+                    cols.push(value_arr.clone() as ArrayRef);
                     fields.push(sort_field);
                 }
             },
@@ -230,6 +233,14 @@ pub fn _get_rows_encoded_ca(
 ) -> PolarsResult<BinaryOffsetChunked> {
     _get_rows_encoded(by, descending, nulls_last)
         .map(|rows| BinaryOffsetChunked::with_chunk(name, rows.into_array()))
+}
+
+pub fn _get_rows_encoded_arr(
+    by: &[Series],
+    descending: &[bool],
+    nulls_last: &[bool],
+) -> PolarsResult<BinaryArray<i64>> {
+    _get_rows_encoded(by, descending, nulls_last).map(|rows| rows.into_array())
 }
 
 pub fn _get_rows_encoded_ca_unordered(

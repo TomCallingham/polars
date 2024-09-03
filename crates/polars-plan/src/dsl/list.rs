@@ -5,6 +5,8 @@ use polars_core::prelude::*;
 #[cfg(feature = "diff")]
 use polars_core::series::ops::NullBehavior;
 #[cfg(feature = "list_sets")]
+use polars_core::utils::SuperTypeFlags;
+#[cfg(feature = "list_sets")]
 use polars_core::utils::SuperTypeOptions;
 
 use crate::prelude::function_expr::ListFunction;
@@ -51,7 +53,7 @@ impl ListNameSpace {
             }),
             &[n],
             false,
-            false,
+            None,
         )
     }
 
@@ -72,7 +74,7 @@ impl ListNameSpace {
             }),
             &[fraction],
             false,
-            false,
+            None,
         )
     }
 
@@ -158,7 +160,7 @@ impl ListNameSpace {
             FunctionExpr::ListExpr(ListFunction::Get(null_on_oob)),
             &[index],
             false,
-            false,
+            None,
         )
     }
 
@@ -173,7 +175,7 @@ impl ListNameSpace {
             FunctionExpr::ListExpr(ListFunction::Gather(null_on_oob)),
             &[index],
             false,
-            false,
+            None,
         )
     }
 
@@ -183,7 +185,7 @@ impl ListNameSpace {
             FunctionExpr::ListExpr(ListFunction::GatherEvery),
             &[n, offset],
             false,
-            false,
+            None,
         )
     }
 
@@ -205,7 +207,7 @@ impl ListNameSpace {
             FunctionExpr::ListExpr(ListFunction::Join(ignore_nulls)),
             &[separator],
             false,
-            false,
+            None,
         )
     }
 
@@ -237,7 +239,7 @@ impl ListNameSpace {
             FunctionExpr::ListExpr(ListFunction::Shift),
             &[periods],
             false,
-            false,
+            None,
         )
     }
 
@@ -247,7 +249,7 @@ impl ListNameSpace {
             FunctionExpr::ListExpr(ListFunction::Slice),
             &[offset, length],
             false,
-            false,
+            None,
         )
     }
 
@@ -297,6 +299,7 @@ impl ListNameSpace {
                 },
                 // we don't yet know the fields
                 GetOutput::map_dtype(move |dt: &DataType| {
+                    polars_ensure!(matches!(dt, DataType::List(_)), SchemaMismatch: "expected 'List' as input to 'list.to_struct' got {}", dt);
                     let out = out_dtype.read().unwrap();
                     match out.as_ref() {
                         // dtype already set
@@ -334,10 +337,10 @@ impl ListNameSpace {
                 FunctionExpr::ListExpr(ListFunction::Contains),
                 &[other],
                 false,
-                false,
+                None,
             )
             .with_function_options(|mut options| {
-                options.input_wildcard_expansion = true;
+                options.flags |= FunctionFlags::INPUT_WILDCARD_EXPANSION;
                 options
             })
     }
@@ -351,10 +354,10 @@ impl ListNameSpace {
                 FunctionExpr::ListExpr(ListFunction::CountMatches),
                 &[other],
                 false,
-                false,
+                None,
             )
             .with_function_options(|mut options| {
-                options.input_wildcard_expansion = true;
+                options.flags |= FunctionFlags::INPUT_WILDCARD_EXPANSION;
                 options
             })
     }
@@ -366,9 +369,11 @@ impl ListNameSpace {
             function: FunctionExpr::ListExpr(ListFunction::SetOperation(set_operation)),
             options: FunctionOptions {
                 collect_groups: ApplyOptions::ElementWise,
-                returns_scalar: false,
-                cast_to_supertypes: Some(SuperTypeOptions { implode_list: true }),
-                input_wildcard_expansion: true,
+                cast_to_supertypes: Some(SuperTypeOptions {
+                    flags: SuperTypeFlags::default() | SuperTypeFlags::ALLOW_IMPLODE_LIST,
+                }),
+                flags: FunctionFlags::default()
+                    | FunctionFlags::INPUT_WILDCARD_EXPANSION & !FunctionFlags::RETURNS_SCALAR,
                 ..Default::default()
             },
         }

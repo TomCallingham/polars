@@ -1,12 +1,12 @@
 use std::error::Error;
 
-use arrow::array::{Array, StaticArray};
+use arrow::array::{Array, MutablePlString, StaticArray};
 use arrow::compute::utils::combine_validities_and;
 use polars_error::PolarsResult;
 
 use crate::chunked_array::metadata::MetadataProperties;
 use crate::datatypes::{ArrayCollectIterExt, ArrayFromIter};
-use crate::prelude::{ChunkedArray, PolarsDataType, Series};
+use crate::prelude::{ChunkedArray, CompatLevel, PolarsDataType, Series, StringChunked};
 use crate::utils::{align_chunks_binary, align_chunks_binary_owned, align_chunks_ternary};
 
 // We need this helper because for<'a> notation can't yet be applied properly
@@ -74,10 +74,17 @@ where
     F: UnaryFnMut<Option<T::Physical<'a>>>,
     V::Array: ArrayFromIter<<F as UnaryFnMut<Option<T::Physical<'a>>>>::Ret>,
 {
-    let iter = ca
-        .downcast_iter()
-        .map(|arr| arr.iter().map(&mut op).collect_arr());
-    ChunkedArray::from_chunk_iter(ca.name(), iter)
+    if ca.has_nulls() {
+        let iter = ca
+            .downcast_iter()
+            .map(|arr| arr.iter().map(&mut op).collect_arr());
+        ChunkedArray::from_chunk_iter(ca.name(), iter)
+    } else {
+        let iter = ca
+            .downcast_iter()
+            .map(|arr| arr.values_iter().map(|x| op(Some(x))).collect_arr());
+        ChunkedArray::from_chunk_iter(ca.name(), iter)
+    }
 }
 
 #[inline]
@@ -106,7 +113,7 @@ where
     V::Array: ArrayFromIter<<F as UnaryFnMut<T::Physical<'a>>>::Ret>,
 {
     if ca.null_count() == ca.len() {
-        let arr = V::Array::full_null(ca.len(), V::get_dtype().to_arrow(true));
+        let arr = V::Array::full_null(ca.len(), V::get_dtype().to_arrow(CompatLevel::newest()));
         return ChunkedArray::with_chunk(ca.name(), arr);
     }
 
@@ -130,7 +137,7 @@ where
     V::Array: ArrayFromIter<K>,
 {
     if ca.null_count() == ca.len() {
-        let arr = V::Array::full_null(ca.len(), V::get_dtype().to_arrow(true));
+        let arr = V::Array::full_null(ca.len(), V::get_dtype().to_arrow(CompatLevel::newest()));
         return Ok(ChunkedArray::with_chunk(ca.name(), arr));
     }
 
@@ -308,7 +315,7 @@ where
 {
     if lhs.null_count() == lhs.len() || rhs.null_count() == rhs.len() {
         let len = lhs.len().min(rhs.len());
-        let arr = V::Array::full_null(len, V::get_dtype().to_arrow(true));
+        let arr = V::Array::full_null(len, V::get_dtype().to_arrow(CompatLevel::newest()));
 
         return ChunkedArray::with_chunk(lhs.name(), arr);
     }
@@ -328,6 +335,43 @@ where
 
             let array: V::Array = element_iter.collect_arr();
             array.with_validity_typed(validity)
+        });
+    ChunkedArray::from_chunk_iter(lhs.name(), iter)
+}
+
+/// Apply elementwise binary function which produces string, amortising allocations.
+///
+/// Currently unused within Polars itself, but it's a useful utility for plugin authors.
+#[inline]
+pub fn binary_elementwise_into_string_amortized<T, U, F>(
+    lhs: &ChunkedArray<T>,
+    rhs: &ChunkedArray<U>,
+    mut op: F,
+) -> StringChunked
+where
+    T: PolarsDataType,
+    U: PolarsDataType,
+    F: for<'a> FnMut(T::Physical<'a>, U::Physical<'a>, &mut String),
+{
+    let (lhs, rhs) = align_chunks_binary(lhs, rhs);
+    let mut buf = String::new();
+    let iter = lhs
+        .downcast_iter()
+        .zip(rhs.downcast_iter())
+        .map(|(lhs_arr, rhs_arr)| {
+            let mut mutarr = MutablePlString::with_capacity(lhs_arr.len());
+            lhs_arr
+                .iter()
+                .zip(rhs_arr.iter())
+                .for_each(|(lhs_opt, rhs_opt)| match (lhs_opt, rhs_opt) {
+                    (None, _) | (_, None) => mutarr.push_null(),
+                    (Some(lhs_val), Some(rhs_val)) => {
+                        buf.clear();
+                        op(lhs_val, rhs_val, &mut buf);
+                        mutarr.push_value(&buf)
+                    },
+                });
+            mutarr.freeze()
         });
     ChunkedArray::from_chunk_iter(lhs.name(), iter)
 }
@@ -704,7 +748,7 @@ where
         let min = lhs.len().min(rhs.len());
         let max = lhs.len().max(rhs.len());
         let len = if min == 1 { max } else { min };
-        let arr = V::Array::full_null(len, V::get_dtype().to_arrow(true));
+        let arr = V::Array::full_null(len, V::get_dtype().to_arrow(CompatLevel::newest()));
 
         return ChunkedArray::with_chunk(lhs.name(), arr);
     }
@@ -745,7 +789,10 @@ where
             let opt_rhs = rhs.get(0);
             match opt_rhs {
                 None => {
-                    let arr = O::Array::full_null(lhs.len(), O::get_dtype().to_arrow(true));
+                    let arr = O::Array::full_null(
+                        lhs.len(),
+                        O::get_dtype().to_arrow(CompatLevel::newest()),
+                    );
                     ChunkedArray::<O>::with_chunk(lhs.name(), arr)
                 },
                 Some(rhs) => unary_kernel(lhs, |arr| rhs_broadcast_kernel(arr, rhs.clone())),
@@ -755,7 +802,10 @@ where
             let opt_lhs = lhs.get(0);
             match opt_lhs {
                 None => {
-                    let arr = O::Array::full_null(rhs.len(), O::get_dtype().to_arrow(true));
+                    let arr = O::Array::full_null(
+                        rhs.len(),
+                        O::get_dtype().to_arrow(CompatLevel::newest()),
+                    );
                     ChunkedArray::<O>::with_chunk(lhs.name(), arr)
                 },
                 Some(lhs) => unary_kernel(rhs, |arr| lhs_broadcast_kernel(lhs.clone(), arr)),
@@ -789,7 +839,10 @@ where
             let opt_rhs = rhs.get(0);
             match opt_rhs {
                 None => {
-                    let arr = O::Array::full_null(lhs.len(), O::get_dtype().to_arrow(true));
+                    let arr = O::Array::full_null(
+                        lhs.len(),
+                        O::get_dtype().to_arrow(CompatLevel::newest()),
+                    );
                     ChunkedArray::<O>::with_chunk(lhs.name(), arr)
                 },
                 Some(rhs) => unary_kernel_owned(lhs, |arr| rhs_broadcast_kernel(arr, rhs.clone())),
@@ -799,7 +852,10 @@ where
             let opt_lhs = lhs.get(0);
             match opt_lhs {
                 None => {
-                    let arr = O::Array::full_null(rhs.len(), O::get_dtype().to_arrow(true));
+                    let arr = O::Array::full_null(
+                        rhs.len(),
+                        O::get_dtype().to_arrow(CompatLevel::newest()),
+                    );
                     ChunkedArray::<O>::with_chunk(lhs.name(), arr)
                 },
                 Some(lhs) => unary_kernel_owned(rhs, |arr| lhs_broadcast_kernel(lhs.clone(), arr)),

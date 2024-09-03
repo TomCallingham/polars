@@ -22,7 +22,7 @@ def test_count_csv(io_files_path: Path, path: str, n_rows: int) -> None:
     expected = pl.DataFrame(pl.Series("len", [n_rows], dtype=pl.UInt32))
 
     # Check if we are using our fast count star
-    assert "FAST COUNT(*)" in lf.explain()
+    assert "FAST_COUNT" in lf.explain()
     assert_frame_equal(lf.collect(), expected)
 
 
@@ -41,7 +41,7 @@ Gr1,B
 
     expected = pl.DataFrame(pl.Series("len", [2], dtype=pl.UInt32))
     lf = pl.scan_csv(csv_a.name, comment_prefix="#").select(pl.len())
-    assert "FAST COUNT(*)" in lf.explain()
+    assert "FAST_COUNT" in lf.explain()
     assert_frame_equal(lf.collect(), expected)
 
 
@@ -54,7 +54,7 @@ def test_count_parquet(io_files_path: Path, pattern: str, n_rows: int) -> None:
     expected = pl.DataFrame(pl.Series("len", [n_rows], dtype=pl.UInt32))
 
     # Check if we are using our fast count star
-    assert "FAST COUNT(*)" in lf.explain()
+    assert "FAST_COUNT" in lf.explain()
     assert_frame_equal(lf.collect(), expected)
 
 
@@ -67,5 +67,18 @@ def test_count_ipc(io_files_path: Path, path: str, n_rows: int) -> None:
     expected = pl.DataFrame(pl.Series("len", [n_rows], dtype=pl.UInt32))
 
     # Check if we are using our fast count star
-    assert "FAST COUNT(*)" in lf.explain()
+    assert "FAST_COUNT" in lf.explain()
+    assert_frame_equal(lf.collect(), expected)
+
+
+@pytest.mark.parametrize(
+    ("path", "n_rows"), [("foods1.ndjson", 27), ("foods*.ndjson", 27 * 2)]
+)
+def test_count_ndjson(io_files_path: Path, path: str, n_rows: int) -> None:
+    lf = pl.scan_ndjson(io_files_path / path).select(pl.len())
+
+    expected = pl.DataFrame(pl.Series("len", [n_rows], dtype=pl.UInt32))
+
+    # Check if we are using our fast count star
+    assert "FAST_COUNT" in lf.explain()
     assert_frame_equal(lf.collect(), expected)

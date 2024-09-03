@@ -1,17 +1,20 @@
+#[cfg(feature = "pivot")]
 use polars_core::utils::try_get_supertype;
 
 use super::*;
 
-impl FunctionNode {
+impl FunctionIR {
     pub(crate) fn clear_cached_schema(&self) {
-        use FunctionNode::*;
+        use FunctionIR::*;
         // We will likely add more branches later
         #[allow(clippy::single_match)]
         match self {
-            RowIndex { schema, .. }
-            | Explode { schema, .. }
-            | Rename { schema, .. }
-            | Unpivot { schema, .. } => {
+            #[cfg(feature = "pivot")]
+            Unpivot { schema, .. } => {
+                let mut guard = schema.lock().unwrap();
+                *guard = None;
+            },
+            RowIndex { schema, .. } | Explode { schema, .. } | Rename { schema, .. } => {
                 let mut guard = schema.lock().unwrap();
                 *guard = None;
             },
@@ -23,7 +26,7 @@ impl FunctionNode {
         &self,
         input_schema: &'a SchemaRef,
     ) -> PolarsResult<Cow<'a, SchemaRef>> {
-        use FunctionNode::*;
+        use FunctionIR::*;
         match self {
             Opaque { schema, .. } => match schema {
                 None => Ok(Cow::Borrowed(input_schema)),
@@ -33,12 +36,12 @@ impl FunctionNode {
                 },
             },
             #[cfg(feature = "python")]
-            OpaquePython { schema, .. } => Ok(schema
+            OpaquePython(OpaquePythonUdf { schema, .. }) => Ok(schema
                 .as_ref()
                 .map(|schema| Cow::Owned(schema.clone()))
                 .unwrap_or_else(|| Cow::Borrowed(input_schema))),
             Pipeline { schema, .. } => Ok(Cow::Owned(schema.clone())),
-            Count { alias, .. } => {
+            FastCount { alias, .. } => {
                 let mut schema: Schema = Schema::with_capacity(1);
                 let name = SmartString::from(
                     alias
@@ -98,6 +101,7 @@ impl FunctionNode {
                 Ok(Cow::Owned(row_index_schema(schema, input_schema, name)))
             },
             Explode { schema, columns } => explode_schema(schema, input_schema, columns),
+            #[cfg(feature = "pivot")]
             Unpivot { schema, args } => unpivot_schema(args, schema, input_schema),
         }
     }
@@ -143,8 +147,9 @@ fn explode_schema<'a>(
     Ok(Cow::Owned(schema))
 }
 
+#[cfg(feature = "pivot")]
 fn unpivot_schema<'a>(
-    args: &UnpivotArgs,
+    args: &UnpivotArgsIR,
     cached_schema: &CachedSchema,
     input_schema: &'a Schema,
 ) -> PolarsResult<Cow<'a, SchemaRef>> {
@@ -156,8 +161,8 @@ fn unpivot_schema<'a>(
     let mut new_schema = args
         .index
         .iter()
-        .map(|id| Field::new(id, input_schema.get(id).unwrap().clone()))
-        .collect::<Schema>();
+        .map(|id| Ok(Field::new(id, input_schema.try_get(id)?.clone())))
+        .collect::<PolarsResult<Schema>>()?;
     let variable_name = args
         .variable_name
         .as_ref()
@@ -179,13 +184,13 @@ fn unpivot_schema<'a>(
         let id_vars = PlHashSet::from_iter(&args.index);
         for (name, dtype) in input_schema.iter() {
             if !id_vars.contains(name) {
-                supertype = try_get_supertype(&supertype, dtype).unwrap();
+                supertype = try_get_supertype(&supertype, dtype)?;
             }
         }
     } else {
         for name in &args.on {
-            let dtype = input_schema.get(name).unwrap();
-            supertype = try_get_supertype(&supertype, dtype).unwrap();
+            let dtype = input_schema.try_get(name)?;
+            supertype = try_get_supertype(&supertype, dtype)?;
         }
     }
     new_schema.with_column(value_name, supertype);

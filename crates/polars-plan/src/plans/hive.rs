@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use percent_encoding::percent_decode_str;
 use polars_core::prelude::*;
 use polars_io::predicates::{BatchStats, ColumnStats};
 use polars_io::prelude::schema_inference::{finish_infer_field_schema, infer_field_schema};
-use polars_io::utils::{BOOLEAN_RE, FLOAT_RE, INTEGER_RE};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -17,11 +15,10 @@ pub struct HivePartitions {
 }
 
 impl HivePartitions {
-    pub fn get_projection_schema_and_indices<T: AsRef<str>>(
+    pub fn get_projection_schema_and_indices(
         &self,
-        names: &[T],
+        names: &PlHashSet<String>,
     ) -> (SchemaRef, Vec<usize>) {
-        let names = names.iter().map(T::as_ref).collect::<PlHashSet<&str>>();
         let mut out_schema = Schema::with_capacity(self.stats.schema().len());
         let mut out_indices = Vec::with_capacity(self.stats.column_stats().len());
 
@@ -66,13 +63,24 @@ pub fn hive_partitions_from_paths(
     paths: &[PathBuf],
     hive_start_idx: usize,
     schema: Option<SchemaRef>,
-) -> PolarsResult<Option<Arc<[HivePartitions]>>> {
+    reader_schema: &Schema,
+    try_parse_dates: bool,
+) -> PolarsResult<Option<Arc<Vec<HivePartitions>>>> {
     let Some(path) = paths.first() else {
         return Ok(None);
     };
 
     let sep = separator(path);
     let path_string = path.to_str().unwrap();
+
+    fn parse_hive_string_and_decode(part: &'_ str) -> Option<(&'_ str, std::borrow::Cow<'_, str>)> {
+        let (k, v) = parse_hive_string(part)?;
+        let v = percent_encoding::percent_decode(v.as_bytes())
+            .decode_utf8()
+            .ok()?;
+
+        Some((k, v))
+    }
 
     macro_rules! get_hive_parts_iter {
         ($e:expr) => {{
@@ -83,19 +91,49 @@ pub fn hive_partitions_from_paths(
                 if index == file_index {
                     return None;
                 }
-                parse_hive_string(part)
+
+                parse_hive_string_and_decode(part)
             })
         }};
     }
 
-    let hive_schema = if let Some(v) = schema {
-        v
+    let hive_schema = if let Some(ref schema) = schema {
+        Arc::new(get_hive_parts_iter!(path_string).map(|(name, _)| {
+                let Some(dtype) = schema.get(name) else {
+                    polars_bail!(
+                        SchemaFieldNotFound:
+                        "path contains column not present in the given Hive schema: {:?}, path = {:?}",
+                        name,
+                        path
+                    )
+                };
+
+                let dtype = if !try_parse_dates && dtype.is_temporal() {
+                    DataType::String
+                } else {
+                    dtype.clone()
+                };
+
+                Ok(Field::new(name, dtype))
+            }).collect::<PolarsResult<Schema>>()?)
     } else {
         let mut hive_schema = Schema::with_capacity(16);
         let mut schema_inference_map: PlHashMap<&str, PlHashSet<DataType>> =
             PlHashMap::with_capacity(16);
 
         for (name, _) in get_hive_parts_iter!(path_string) {
+            // If the column is also in the file we can use the dtype stored there.
+            if let Some(dtype) = reader_schema.get(name) {
+                let dtype = if !try_parse_dates && dtype.is_temporal() {
+                    DataType::String
+                } else {
+                    dtype.clone()
+                };
+
+                hive_schema.insert_at_index(hive_schema.len(), name.into(), dtype.clone())?;
+                continue;
+            }
+
             hive_schema.insert_at_index(hive_schema.len(), name.into(), DataType::String)?;
             schema_inference_map.insert(name, PlHashSet::with_capacity(4));
         }
@@ -111,7 +149,11 @@ pub fn hive_partitions_from_paths(
                         continue;
                     };
 
-                    entry.insert(infer_field_schema(value, false, false));
+                    if value.is_empty() || value == "__HIVE_DEFAULT_PARTITION__" {
+                        continue;
+                    }
+
+                    entry.insert(infer_field_schema(value.as_ref(), try_parse_dates, false));
                 }
             }
 
@@ -123,40 +165,62 @@ pub fn hive_partitions_from_paths(
         Arc::new(hive_schema)
     };
 
-    let mut hive_partitions = Vec::with_capacity(paths.len());
+    let mut buffers = polars_io::csv::read::buffer::init_buffers(
+        &(0..hive_schema.len()).collect::<Vec<_>>(),
+        paths.len(),
+        hive_schema.as_ref(),
+        None,
+        polars_io::prelude::CsvEncoding::Utf8,
+        false,
+    )?;
 
     for path in paths {
         let path = path.to_str().unwrap();
 
-        let column_stats = get_hive_parts_iter!(path)
-            .map(|(name, value)| {
-                let Some(dtype) = hive_schema.as_ref().get(name) else {
-                    polars_bail!(
-                        SchemaFieldNotFound:
-                        "path contains column not present in the given Hive schema: {:?}, path = {:?}",
-                        name,
-                        path
-                    )
-                };
-
-                Ok(ColumnStats::from_column_literal(value_to_series(
+        for (name, value) in get_hive_parts_iter!(path) {
+            let Some(index) = hive_schema.index_of(name) else {
+                polars_bail!(
+                    SchemaFieldNotFound:
+                    "path contains column not present in the given Hive schema: {:?}, path = {:?}",
                     name,
-                    value,
-                    Some(dtype),
-                )?))
+                    path
+                )
+            };
+
+            let buf = buffers.get_mut(index).unwrap();
+
+            if !value.is_empty() && value != "__HIVE_DEFAULT_PARTITION__" {
+                buf.add(value.as_bytes(), false, false, false)?;
+            } else {
+                buf.add_null(false);
+            }
+        }
+    }
+
+    let mut hive_partitions = Vec::with_capacity(paths.len());
+    let buffers = buffers
+        .into_iter()
+        .map(|x| x.into_series())
+        .collect::<PolarsResult<Vec<_>>>()?;
+
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..paths.len() {
+        let column_stats = buffers
+            .iter()
+            .map(|x| {
+                ColumnStats::from_column_literal(unsafe { x.take_slice_unchecked(&[i as IdxSize]) })
             })
-            .collect::<PolarsResult<Vec<_>>>()?;
+            .collect::<Vec<_>>();
 
         if column_stats.is_empty() {
             polars_bail!(
                 ComputeError: "expected Hive partitioned path, got {}\n\n\
                 This error occurs if some paths are Hive partitioned and some paths are not.",
-                path
+                paths[i].to_str().unwrap(),
             )
         }
 
         let stats = BatchStats::new(hive_schema.clone(), column_stats, None);
-
         hive_partitions.push(HivePartitions { stats });
     }
 
@@ -166,7 +230,7 @@ pub fn hive_partitions_from_paths(
 /// Determine the path separator for identifying Hive partitions.
 #[cfg(target_os = "windows")]
 fn separator(url: &Path) -> char {
-    if polars_io::utils::is_cloud_url(url) {
+    if polars_io::path_utils::is_cloud_url(url) {
         '/'
     } else {
         '\\'
@@ -195,37 +259,7 @@ fn parse_hive_string(part: &'_ str) -> Option<(&'_ str, &'_ str)> {
     // Files are not Hive partitions, so globs are not valid.
     if value.contains('*') {
         return None;
-    }
-
-    Some((name, value))
-}
-
-/// Parse a string value into a single-value [`Series`].
-fn value_to_series(name: &str, value: &str, dtype: Option<&DataType>) -> PolarsResult<Series> {
-    let fn_err = || polars_err!(ComputeError: "unable to parse Hive partition value: {:?}", value);
-
-    let mut s = if INTEGER_RE.is_match(value) {
-        let value = value.parse::<i64>().map_err(|_| fn_err())?;
-        Series::new(name, &[value])
-    } else if BOOLEAN_RE.is_match(value) {
-        let value = value.parse::<bool>().map_err(|_| fn_err())?;
-        Series::new(name, &[value])
-    } else if FLOAT_RE.is_match(value) {
-        let value = value.parse::<f64>().map_err(|_| fn_err())?;
-        Series::new(name, &[value])
-    } else if value == "__HIVE_DEFAULT_PARTITION__" {
-        Series::new_null(name, 1)
-    } else {
-        let value = percent_decode_str(value)
-            .decode_utf8()
-            .map_err(|_| fn_err())?;
-        Series::new(name, &[value])
     };
 
-    // TODO: Avoid expensive logic above when dtype is known
-    if let Some(dt) = dtype {
-        s = s.strict_cast(dt)?;
-    }
-
-    Ok(s)
+    Some((name, value))
 }

@@ -16,7 +16,7 @@
 //! }
 //! ```
 
-mod buffer;
+pub mod buffer;
 mod options;
 mod parser;
 mod read_impl;
@@ -30,4 +30,3 @@ pub use parser::count_rows;
 pub use read_impl::batched::{BatchedCsvReader, OwnedBatchedCsvReader};
 pub use reader::CsvReader;
 pub use schema_inference::infer_file_schema;
-pub use utils::is_compressed;

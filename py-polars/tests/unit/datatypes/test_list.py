@@ -13,7 +13,7 @@ from polars.testing import assert_frame_equal, assert_series_equal
 from tests.unit.conftest import NUMERIC_DTYPES
 
 if TYPE_CHECKING:
-    from polars.type_aliases import PolarsDataType
+    from polars._typing import PolarsDataType
 
 
 def test_dtype() -> None:
@@ -288,10 +288,7 @@ def test_fast_explode_on_list_struct_6208() -> None:
         "label": ["l", "l"],
         "tag": ["t", "t"],
         "ref": [1, 1],
-        "parents": [
-            {"ref": 1, "tag": "t", "ratio": 62.3},
-            {"ref": None, "tag": None, "ratio": None},
-        ],
+        "parents": [{"ref": 1, "tag": "t", "ratio": 62.3}, None],
     }
 
 

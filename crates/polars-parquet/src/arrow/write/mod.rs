@@ -81,7 +81,7 @@ pub struct WriteOptions {
     /// The compression to apply to every page
     pub compression: CompressionOptions,
     /// The size to flush a page, defaults to 1024 * 1024 if None
-    pub data_pagesize_limit: Option<usize>,
+    pub data_page_size: Option<usize>,
 }
 
 use arrow::compute::aggregate::estimated_bytes_size;
@@ -298,7 +298,7 @@ pub fn array_to_pages(
     let byte_size = estimated_bytes_size(primitive_array);
 
     const DEFAULT_PAGE_SIZE: usize = 1024 * 1024;
-    let max_page_size = options.data_pagesize_limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    let max_page_size = options.data_page_size.unwrap_or(DEFAULT_PAGE_SIZE);
     let max_page_size = max_page_size.min(2usize.pow(31) - 2usize.pow(25)); // allowed maximum page size
     let bytes_per_row = if number_of_rows == 0 {
         0
@@ -361,9 +361,12 @@ pub fn array_to_page_simple(
     let data_type = array.data_type();
 
     match data_type.to_logical_type() {
-        ArrowDataType::Boolean => {
-            boolean::array_to_page(array.as_any().downcast_ref().unwrap(), options, type_)
-        },
+        ArrowDataType::Boolean => boolean::array_to_page(
+            array.as_any().downcast_ref().unwrap(),
+            options,
+            type_,
+            encoding,
+        ),
         // casts below MUST match the casts done at the metadata (field -> parquet type).
         ArrowDataType::UInt8 => {
             return primitive::array_to_page_integer::<u8, i32>(

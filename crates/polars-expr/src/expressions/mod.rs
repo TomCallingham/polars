@@ -378,9 +378,11 @@ impl<'a> AggregationContext<'a> {
 
     /// Update the group tuples
     pub(crate) fn with_groups(&mut self, groups: GroupsProxy) -> &mut Self {
-        // In case of new groups, a series always needs to be flattened
-        self.with_series(self.flat_naive().into_owned(), false, None)
-            .unwrap();
+        if let AggState::AggregatedList(_) = self.agg_state() {
+            // In case of new groups, a series always needs to be flattened
+            self.with_series(self.flat_naive().into_owned(), false, None)
+                .unwrap();
+        }
         self.groups = Cow::Owned(groups);
         // make sure that previous setting is not used
         self.update_groups = UpdateGroups::No;
@@ -609,6 +611,10 @@ impl PhysicalIoExpr for PhysicalIoHelper {
             state.insert_has_window_function_flag();
         }
         self.expr.evaluate(df, &state)
+    }
+
+    fn live_variables(&self) -> Option<Vec<Arc<str>>> {
+        Some(expr_to_leaf_column_names(self.expr.as_expression()?))
     }
 
     #[cfg(feature = "parquet")]

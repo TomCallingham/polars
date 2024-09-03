@@ -744,3 +744,42 @@ def test_hash_empty_series_16577() -> None:
     s = pl.Series(values=None)
     out = pl.LazyFrame().select(s).collect()
     assert out.equals(s.to_frame())
+
+
+def test_cse_non_scalar_length_mismatch_17732() -> None:
+    df = pl.LazyFrame({"a": pl.Series(range(30), dtype=pl.Int32)})
+    got = (
+        df.lazy()
+        .with_columns(
+            pl.col("a").head(5).min().alias("b"),
+            pl.col("a").head(5).max().alias("c"),
+        )
+        .collect(comm_subexpr_elim=True)
+    )
+    expect = pl.DataFrame(
+        {
+            "a": pl.Series(range(30), dtype=pl.Int32),
+            "b": pl.Series([0] * 30, dtype=pl.Int32),
+            "c": pl.Series([4] * 30, dtype=pl.Int32),
+        }
+    )
+
+    assert_frame_equal(expect, got)
+
+
+def test_cse_chunks_18124() -> None:
+    df = pl.DataFrame(
+        {
+            "ts_diff": [timedelta(seconds=60)] * 2,
+            "ts_diff_after": [timedelta(seconds=120)] * 2,
+        }
+    )
+    df = pl.concat([df, df], rechunk=False)
+    assert (
+        df.lazy()
+        .with_columns(
+            ts_diff_sign=pl.col("ts_diff") > pl.duration(seconds=0),
+            ts_diff_after_sign=pl.col("ts_diff_after") > pl.duration(seconds=0),
+        )
+        .filter(pl.col("ts_diff") > 1)
+    ).collect().shape == (4, 4)

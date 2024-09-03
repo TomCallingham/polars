@@ -8,7 +8,7 @@ pub mod string_cache;
 use bitflags::bitflags;
 pub use builder::*;
 pub use merge::*;
-use polars_utils::iter::EnumerateIdxTrait;
+use polars_utils::itertools::Itertools;
 use polars_utils::sync::SyncPtr;
 pub use revmap::*;
 
@@ -341,7 +341,7 @@ impl LogicalType for CategoricalChunked {
 
                 let f = |idx: u32| mapping.get(idx);
 
-                if !self.physical.has_validity() {
+                if !self.physical.has_nulls() {
                     self.physical
                         .into_no_null_iter()
                         .for_each(|idx| builder.append_value(f(idx)));
@@ -464,7 +464,7 @@ mod test {
         let ca = ca.cast(&DataType::Categorical(None, Default::default()))?;
         let ca = ca.categorical().unwrap();
 
-        let arr = ca.to_arrow(true, false);
+        let arr = ca.to_arrow(CompatLevel::newest(), false);
         let s = Series::try_from(("foo", arr))?;
         assert!(matches!(s.dtype(), &DataType::Categorical(_, _)));
         assert_eq!(s.null_count(), 1);

@@ -51,7 +51,7 @@ pub(crate) fn cast_chunks(
     let check_nulls = matches!(options, CastOptions::Strict);
     let options = options.into();
 
-    let arrow_dtype = dtype.to_arrow(true);
+    let arrow_dtype = dtype.try_to_arrow(CompatLevel::newest())?;
     chunks
         .iter()
         .map(|arr| {
@@ -125,7 +125,7 @@ fn cast_single_to_struct(
         new_fields.push(Series::full_null(&fld.name, length, &fld.dtype));
     }
 
-    Ok(StructChunked::new_unchecked(name, &new_fields).into_series())
+    StructChunked::from_series(name, &new_fields).map(|ca| ca.into_series())
 }
 
 impl<T> ChunkedArray<T>

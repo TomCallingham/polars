@@ -19,7 +19,7 @@ from polars.testing.parametric.strategies.dtype import _time_units
 if TYPE_CHECKING:
     from hypothesis.strategies import SearchStrategy
 
-    from polars.type_aliases import ClosedInterval, PolarsDataType, TimeUnit
+    from polars._typing import ClosedInterval, PolarsDataType, TimeUnit
 
 
 @pytest.fixture()
@@ -938,7 +938,7 @@ def test_rolling_min_periods(
     )["value"]
     assert_series_equal(result, pl.Series("value", expected, pl.Int64))
 
-    # Startig with unsorted data
+    # Starting with unsorted data
     result = (
         df.sort("date", descending=True)
         .with_columns(

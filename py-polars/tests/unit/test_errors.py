@@ -24,7 +24,7 @@ from polars.exceptions import (
 from tests.unit.conftest import TEMPORAL_DTYPES
 
 if TYPE_CHECKING:
-    from polars.type_aliases import ConcatMethod
+    from polars._typing import ConcatMethod
 
 
 def test_error_on_empty_group_by() -> None:
@@ -45,7 +45,7 @@ def test_error_on_reducing_map() -> None:
             r"the input length \(6\); consider using `apply` instead"
         ),
     ):
-        df.group_by("id").agg(pl.map_batches(["t", "y"], np.trapz))
+        df.group_by("id").agg(pl.map_batches(["t", "y"], np.mean))
 
     df = pl.DataFrame({"x": [1, 2, 3, 4], "group": [1, 2, 1, 2]})
     with pytest.raises(
@@ -325,8 +325,8 @@ def test_datetime_time_add_err() -> None:
 
 def test_invalid_dtype() -> None:
     with pytest.raises(
-        ValueError,
-        match=r"given dtype: 'mayonnaise' is not a valid Polars data type and cannot be converted into one",
+        TypeError,
+        match="cannot parse input of type 'str' into Polars data type: 'mayonnaise'",
     ):
         pl.Series([1, 2], dtype="mayonnaise")  # type: ignore[arg-type]
 
@@ -484,7 +484,7 @@ def test_skip_nulls_err() -> None:
 
     with pytest.raises(
         ComputeError,
-        match=r"The output type of the 'apply' function cannot be determined",
+        match=r"The output type of the 'map_elements' function cannot be determined",
     ):
         df.with_columns(pl.col("foo").map_elements(lambda x: x, skip_nulls=True))
 
@@ -542,7 +542,7 @@ def test_sort_by_err_9259() -> None:
 def test_empty_inputs_error() -> None:
     df = pl.DataFrame({"col1": [1]})
     with pytest.raises(
-        ComputeError, match="expression: 'sum_horizontal' didn't get any inputs"
+        pl.exceptions.InvalidOperationError, match="expected at least 1 input"
     ):
         df.select(pl.sum_horizontal(pl.exclude("col1")))
 
@@ -587,7 +587,7 @@ def test_invalid_is_in_dtypes(
     if expected is None:
         with pytest.raises(
             InvalidOperationError,
-            match="`is_in` cannot check for .*? values in .*? data",
+            match="'is_in' cannot check for .*? values in .*? data",
         ):
             df.select(pl.col(colname).is_in(values))
     else:
@@ -650,7 +650,7 @@ def test_invalid_product_type() -> None:
 
 def test_fill_null_invalid_supertype() -> None:
     df = pl.DataFrame({"date": [date(2022, 1, 1), None]})
-    with pytest.raises(InvalidOperationError, match="could not determine supertype of"):
+    with pytest.raises(InvalidOperationError, match="got invalid or ambiguous"):
         df.select(pl.col("date").fill_null(1.0))
 
 
@@ -676,7 +676,7 @@ def test_raise_on_sorted_multi_args() -> None:
 def test_err_invalid_comparison() -> None:
     with pytest.raises(
         SchemaError,
-        match="could not evalulate comparison between series 'a' of dtype: date and series 'b' of dtype: bool",
+        match="could not evaluate comparison between series 'a' of dtype: date and series 'b' of dtype: bool",
     ):
         _ = pl.Series("a", [date(2020, 1, 1)]) == pl.Series("b", [True])
 
@@ -691,3 +691,8 @@ def test_no_panic_pandas_nat() -> None:
     # we don't want to support pd.nat, but don't want to panic.
     with pytest.raises(Exception):  # noqa: B017
         pl.DataFrame({"x": [pd.NaT]})
+
+
+def test_list_to_struct_invalid_type() -> None:
+    with pytest.raises(pl.exceptions.SchemaError):
+        pl.DataFrame({"a": 1}).select(pl.col("a").list.to_struct())

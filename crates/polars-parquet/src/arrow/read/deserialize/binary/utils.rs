@@ -40,17 +40,6 @@ impl<O: Offset> Binary<O> {
     pub fn len(&self) -> usize {
         self.offsets.len_proxy()
     }
-
-    #[inline]
-    pub fn extend_lengths<I: Iterator<Item = usize>>(&mut self, lengths: I, values: &mut &[u8]) {
-        let current_offset = *self.offsets.last();
-        self.offsets.try_extend_from_lengths(lengths).unwrap();
-        let new_offset = *self.offsets.last();
-        let length = new_offset.to_usize() - current_offset.to_usize();
-        let (consumed, remaining) = values.split_at(length);
-        *values = remaining;
-        self.values.extend_from_slice(consumed);
-    }
 }
 
 impl<'a, O: Offset> Pushable<&'a [u8]> for Binary<O> {
@@ -94,11 +83,25 @@ impl<'a, O: Offset> Pushable<&'a [u8]> for Binary<O> {
 #[derive(Debug)]
 pub struct BinaryIter<'a> {
     values: &'a [u8],
+
+    /// A maximum number of items that this [`BinaryIter`] may produce.
+    ///
+    /// This equal the length of the iterator i.f.f. the data encoded by the [`BinaryIter`] is not
+    /// nullable.
+    max_num_values: usize,
 }
 
 impl<'a> BinaryIter<'a> {
-    pub fn new(values: &'a [u8]) -> Self {
-        Self { values }
+    pub fn new(values: &'a [u8], max_num_values: usize) -> Self {
+        Self {
+            values,
+            max_num_values,
+        }
+    }
+
+    /// Return the length of the iterator when the data is not nullable.
+    pub fn len_when_not_nullable(&self) -> usize {
+        self.max_num_values
     }
 }
 
@@ -107,14 +110,22 @@ impl<'a> Iterator for BinaryIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.values.is_empty() {
+        if self.max_num_values == 0 {
+            assert!(self.values.is_empty());
             return None;
         }
+
         let (length, remaining) = self.values.split_at(4);
         let length: [u8; 4] = unsafe { length.try_into().unwrap_unchecked() };
         let length = u32::from_le_bytes(length) as usize;
         let (result, remaining) = remaining.split_at(length);
+        self.max_num_values -= 1;
         self.values = remaining;
         Some(result)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.max_num_values))
     }
 }

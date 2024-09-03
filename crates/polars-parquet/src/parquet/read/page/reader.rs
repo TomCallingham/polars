@@ -1,7 +1,8 @@
-use std::io::Read;
-use std::sync::Arc;
+use std::io::Seek;
+use std::sync::OnceLock;
 
 use parquet_format_safe::thrift::protocol::TCompactInputProtocol;
+use polars_utils::mmap::{MemReader, MemSlice};
 
 use super::PageIterator;
 use crate::parquet::compression::Compression;
@@ -12,7 +13,7 @@ use crate::parquet::page::{
     CompressedDataPage, CompressedDictPage, CompressedPage, DataPageHeader, PageType,
     ParquetPageHeader,
 };
-use crate::parquet::parquet_bridge::Encoding;
+use crate::parquet::CowBuffer;
 
 /// This meta is a small part of [`ColumnChunkMetaData`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,17 +56,14 @@ impl From<&ColumnChunkMetaData> for PageMetaData {
     }
 }
 
-/// Type declaration for a page filter
-pub type PageFilter = Arc<dyn Fn(&Descriptor, &DataPageHeader) -> bool + Send + Sync>;
-
 /// A fallible [`Iterator`] of [`CompressedDataPage`]. This iterator reads pages back
 /// to back until all pages have been consumed.
 /// The pages from this iterator always have [`None`] [`crate::parquet::page::CompressedDataPage::selected_rows()`] since
 /// filter pushdown is not supported without a
 /// pre-computed [page index](https://github.com/apache/parquet-format/blob/master/PageIndex.md).
-pub struct PageReader<R: Read> {
+pub struct PageReader {
     // The source
-    reader: R,
+    reader: MemReader,
 
     compression: Compression,
 
@@ -74,8 +72,6 @@ pub struct PageReader<R: Read> {
 
     // The number of total values in this column chunk.
     total_num_values: i64,
-
-    pages_filter: PageFilter,
 
     descriptor: Descriptor,
 
@@ -86,28 +82,26 @@ pub struct PageReader<R: Read> {
     max_page_size: usize,
 }
 
-impl<R: Read> PageReader<R> {
+impl PageReader {
     /// Returns a new [`PageReader`].
     ///
     /// It assumes that the reader has been `sought` (`seek`) to the beginning of `column`.
     /// The parameter `max_header_size`
     pub fn new(
-        reader: R,
+        reader: MemReader,
         column: &ColumnChunkMetaData,
-        pages_filter: PageFilter,
         scratch: Vec<u8>,
         max_page_size: usize,
     ) -> Self {
-        Self::new_with_page_meta(reader, column.into(), pages_filter, scratch, max_page_size)
+        Self::new_with_page_meta(reader, column.into(), scratch, max_page_size)
     }
 
     /// Create a a new [`PageReader`] with [`PageMetaData`].
     ///
     /// It assumes that the reader has been `sought` (`seek`) to the beginning of `column`.
     pub fn new_with_page_meta(
-        reader: R,
+        reader: MemReader,
         reader_meta: PageMetaData,
-        pages_filter: PageFilter,
         scratch: Vec<u8>,
         max_page_size: usize,
     ) -> Self {
@@ -117,40 +111,84 @@ impl<R: Read> PageReader<R> {
             compression: reader_meta.compression,
             seen_num_values: 0,
             descriptor: reader_meta.descriptor,
-            pages_filter,
             scratch,
             max_page_size,
         }
     }
 
     /// Returns the reader and this Readers' interval buffer
-    pub fn into_inner(self) -> (R, Vec<u8>) {
+    pub fn into_inner(self) -> (MemReader, Vec<u8>) {
         (self.reader, self.scratch)
+    }
+
+    pub fn total_num_values(&self) -> usize {
+        debug_assert!(self.total_num_values >= 0);
+        self.total_num_values as usize
+    }
+
+    pub fn read_dict(&mut self) -> ParquetResult<Option<CompressedDictPage>> {
+        // If there are no pages, we cannot check if the first page is a dictionary page. Just
+        // return the fact there is no dictionary page.
+        if self.reader.remaining_len() == 0 {
+            return Ok(None);
+        }
+
+        // a dictionary page exists iff the first data page is not at the start of
+        // the column
+        let seek_offset = self.reader.position();
+        let page_header = read_page_header(&mut self.reader, self.max_page_size)?;
+        let page_type = page_header.type_.try_into()?;
+
+        if !matches!(page_type, PageType::DictionaryPage) {
+            self.reader
+                .seek(std::io::SeekFrom::Start(seek_offset as u64))?;
+            return Ok(None);
+        }
+
+        let read_size: usize = page_header.compressed_page_size.try_into()?;
+
+        if read_size > self.max_page_size {
+            return Err(ParquetError::WouldOverAllocate);
+        }
+
+        let buffer = self.reader.read_slice(read_size);
+
+        if buffer.len() != read_size {
+            return Err(ParquetError::oos(
+                "The page header reported the wrong page size",
+            ));
+        }
+
+        finish_page(
+            page_header,
+            buffer,
+            self.compression,
+            &self.descriptor,
+            None,
+        )
+        .map(|p| {
+            if let CompressedPage::Dict(d) = p {
+                Some(d)
+            } else {
+                unreachable!()
+            }
+        })
     }
 }
 
-impl<R: Read> PageIterator for PageReader<R> {
+impl PageIterator for PageReader {
     fn swap_buffer(&mut self, scratch: &mut Vec<u8>) {
         std::mem::swap(&mut self.scratch, scratch)
     }
 }
 
-impl<R: Read> Iterator for PageReader<R> {
+impl Iterator for PageReader {
     type Item = ParquetResult<CompressedPage>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut buffer = std::mem::take(&mut self.scratch);
-        let maybe_maybe_page = next_page(self, &mut buffer).transpose();
-        if let Some(ref maybe_page) = maybe_maybe_page {
-            if let Ok(CompressedPage::Data(page)) = maybe_page {
-                // check if we should filter it (only valid for data pages)
-                let to_consume = (self.pages_filter)(&self.descriptor, page.header());
-                if !to_consume {
-                    self.scratch = std::mem::take(&mut buffer);
-                    return self.next();
-                }
-            }
-        } else {
+        let maybe_maybe_page = next_page(self).transpose();
+        if maybe_maybe_page.is_none() {
             // no page => we take back the buffer
             self.scratch = std::mem::take(&mut buffer);
         }
@@ -159,8 +197,8 @@ impl<R: Read> Iterator for PageReader<R> {
 }
 
 /// Reads Page header from Thrift.
-pub(super) fn read_page_header<R: Read>(
-    reader: &mut R,
+pub(super) fn read_page_header(
+    reader: &mut MemReader,
     max_size: usize,
 ) -> ParquetResult<ParquetPageHeader> {
     let mut prot = TCompactInputProtocol::new(reader, max_size);
@@ -170,25 +208,17 @@ pub(super) fn read_page_header<R: Read>(
 
 /// This function is lightweight and executes a minimal amount of work so that it is IO bounded.
 // Any un-necessary CPU-intensive tasks SHOULD be executed on individual pages.
-fn next_page<R: Read>(
-    reader: &mut PageReader<R>,
-    buffer: &mut Vec<u8>,
-) -> ParquetResult<Option<CompressedPage>> {
+fn next_page(reader: &mut PageReader) -> ParquetResult<Option<CompressedPage>> {
     if reader.seen_num_values >= reader.total_num_values {
         return Ok(None);
     };
-    build_page(reader, buffer)
+    build_page(reader)
 }
 
-pub(super) fn build_page<R: Read>(
-    reader: &mut PageReader<R>,
-    buffer: &mut Vec<u8>,
-) -> ParquetResult<Option<CompressedPage>> {
+pub(super) fn build_page(reader: &mut PageReader) -> ParquetResult<Option<CompressedPage>> {
     let page_header = read_page_header(&mut reader.reader, reader.max_page_size)?;
 
-    reader.seen_num_values += get_page_header(&page_header)?
-        .map(|x| x.num_values() as i64)
-        .unwrap_or_default();
+    reader.seen_num_values += get_page_num_values(&page_header)? as i64;
 
     let read_size: usize = page_header.compressed_page_size.try_into()?;
 
@@ -196,17 +226,11 @@ pub(super) fn build_page<R: Read>(
         return Err(ParquetError::WouldOverAllocate);
     }
 
-    buffer.clear();
-    buffer.try_reserve(read_size)?;
-    let bytes_read = reader
-        .reader
-        .by_ref()
-        .take(read_size as u64)
-        .read_to_end(buffer)?;
+    let buffer = reader.reader.read_slice(read_size);
 
-    if bytes_read != read_size {
+    if buffer.len() != read_size {
         return Err(ParquetError::oos(
-            "The page header reported the wrong page size".to_string(),
+            "The page header reported the wrong page size",
         ));
     }
 
@@ -222,13 +246,17 @@ pub(super) fn build_page<R: Read>(
 
 pub(super) fn finish_page(
     page_header: ParquetPageHeader,
-    data: &mut Vec<u8>,
+    data: MemSlice,
     compression: Compression,
     descriptor: &Descriptor,
     selected_rows: Option<Vec<Interval>>,
 ) -> ParquetResult<CompressedPage> {
     let type_ = page_header.type_.try_into()?;
     let uncompressed_page_size = page_header.uncompressed_page_size.try_into()?;
+
+    static DO_VERBOSE: OnceLock<bool> = OnceLock::new();
+    let do_verbose = *DO_VERBOSE.get_or_init(|| std::env::var("PARQUET_DO_VERBOSE").is_ok());
+
     match type_ {
         PageType::DictionaryPage => {
             let dict_header = page_header.dictionary_page_header.as_ref().ok_or_else(|| {
@@ -236,11 +264,16 @@ pub(super) fn finish_page(
                     "The page header type is a dictionary page but the dictionary header is empty",
                 )
             })?;
+
+            if do_verbose {
+                println!("DictPage ( )");
+            }
+
             let is_sorted = dict_header.is_sorted.unwrap_or(false);
 
             // move the buffer to `dict_page`
             let page = CompressedDictPage::new(
-                std::mem::take(data),
+                CowBuffer::Borrowed(data),
                 compression,
                 uncompressed_page_size,
                 dict_header.num_values.try_into()?,
@@ -256,9 +289,16 @@ pub(super) fn finish_page(
                 )
             })?;
 
+            if do_verbose {
+                println!(
+                    "DataPageV1 ( num_values: {}, datatype: {:?}, encoding: {:?} )",
+                    header.num_values, descriptor.primitive_type, header.encoding
+                );
+            }
+
             Ok(CompressedPage::Data(CompressedDataPage::new_read(
                 DataPageHeader::V1(header),
-                std::mem::take(data),
+                CowBuffer::Borrowed(data),
                 compression,
                 uncompressed_page_size,
                 descriptor.clone(),
@@ -272,9 +312,16 @@ pub(super) fn finish_page(
                 )
             })?;
 
+            if do_verbose {
+                println!(
+                    "DataPageV2 ( num_values: {}, datatype: {:?}, encoding: {:?} )",
+                    header.num_values, descriptor.primitive_type, header.encoding
+                );
+            }
+
             Ok(CompressedPage::Data(CompressedDataPage::new_read(
                 DataPageHeader::V2(header),
-                std::mem::take(data),
+                CowBuffer::Borrowed(data),
                 compression,
                 uncompressed_page_size,
                 descriptor.clone(),
@@ -284,30 +331,31 @@ pub(super) fn finish_page(
     }
 }
 
-pub(super) fn get_page_header(header: &ParquetPageHeader) -> ParquetResult<Option<DataPageHeader>> {
+pub(super) fn get_page_num_values(header: &ParquetPageHeader) -> ParquetResult<i32> {
     let type_ = header.type_.try_into()?;
     Ok(match type_ {
         PageType::DataPage => {
-            let header = header.data_page_header.clone().ok_or_else(|| {
-                ParquetError::oos(
-                    "The page header type is a v1 data page but the v1 header is empty",
-                )
-            })?;
-            let _: Encoding = header.encoding.try_into()?;
-            let _: Encoding = header.repetition_level_encoding.try_into()?;
-            let _: Encoding = header.definition_level_encoding.try_into()?;
-
-            Some(DataPageHeader::V1(header))
+            header
+                .data_page_header
+                .as_ref()
+                .ok_or_else(|| {
+                    ParquetError::oos(
+                        "The page header type is a v1 data page but the v1 header is empty",
+                    )
+                })?
+                .num_values
         },
         PageType::DataPageV2 => {
-            let header = header.data_page_header_v2.clone().ok_or_else(|| {
-                ParquetError::oos(
-                    "The page header type is a v1 data page but the v1 header is empty",
-                )
-            })?;
-            let _: Encoding = header.encoding.try_into()?;
-            Some(DataPageHeader::V2(header))
+            header
+                .data_page_header_v2
+                .as_ref()
+                .ok_or_else(|| {
+                    ParquetError::oos(
+                        "The page header type is a v1 data page but the v1 header is empty",
+                    )
+                })?
+                .num_values
         },
-        _ => None,
+        _ => 0,
     })
 }

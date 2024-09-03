@@ -20,7 +20,7 @@ impl Int128Chunked {
             let (_, values, validity) = default.into_inner();
 
             *arr = PrimitiveArray::new(
-                DataType::Decimal(precision, Some(scale)).to_arrow(true),
+                DataType::Decimal(precision, Some(scale)).to_arrow(CompatLevel::newest()),
                 values,
                 validity,
             );
@@ -127,7 +127,7 @@ impl DecimalChunked {
         }
     }
 
-    pub(crate) fn to_scale(&self, scale: usize) -> PolarsResult<Cow<'_, Self>> {
+    pub fn to_scale(&self, scale: usize) -> PolarsResult<Cow<'_, Self>> {
         if self.scale() == scale {
             return Ok(Cow::Borrowed(self));
         }
