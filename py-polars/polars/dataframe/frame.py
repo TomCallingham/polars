@@ -1378,7 +1378,7 @@ class DataFrame:
             if isinstance(value, str):
                 from polars._utils.TC_expressions import trans_func
 
-                self._df = trans_func(self._df, key, value)
+                self._df = trans_func(self, key, value)._df
 
             else:
                 self._df = self.with_columns([pl.Series(key, np.array(value))])._df
