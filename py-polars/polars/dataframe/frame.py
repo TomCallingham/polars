@@ -1369,11 +1369,19 @@ class DataFrame:
     ) -> None:  # pragma: no cover
         # df["foo"] = series
         if isinstance(key, str):
-            msg = (
-                "DataFrame object does not support `Series` assignment by index"
-                "\n\nUse `DataFrame.with_columns`."
-            )
-            raise TypeError(msg)
+            # TChange
+            # msg = (
+            #     "DataFrame object does not support `Series` assignment by index"
+            #     "\n\nUse `DataFrame.with_columns`."
+            # )
+            # raise TypeError(msg)
+            if isinstance(value, str):
+                from polars._utils.TC_expressions import trans_func
+
+                self._df = trans_func(self._df, key, value)
+
+            else:
+                self._df = self.with_columns([pl.Series(key, np.array(value))])._df
 
         # df[["C", "D"]]
         elif isinstance(key, list):

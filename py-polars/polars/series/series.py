@@ -4280,6 +4280,11 @@ class Series:
 
         return out
 
+    @property
+    def v(self) -> np.ndarray[Any, Any]:
+        """Shorthand for to numpy."""
+        return self.to_numpy()
+
     def to_numpy(
         self,
         *,
