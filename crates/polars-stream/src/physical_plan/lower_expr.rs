@@ -4,7 +4,6 @@ use polars_core::frame::DataFrame;
 use polars_core::prelude::{DataType, Field, InitHashMaps, PlHashMap, PlHashSet};
 use polars_core::schema::{Schema, SchemaExt};
 use polars_error::PolarsResult;
-use polars_expr::planner::get_expr_depth_limit;
 use polars_expr::state::ExecutionState;
 use polars_expr::{ExpressionConversionState, create_physical_expr};
 use polars_ops::frame::{JoinArgs, JoinType};
@@ -384,8 +383,7 @@ fn build_fallback_node_with_ctx(
     };
 
     let output_schema = schema_for_select(input_stream, exprs, ctx)?;
-    let expr_depth_limit = get_expr_depth_limit()?;
-    let mut conv_state = ExpressionConversionState::new(false, expr_depth_limit);
+    let mut conv_state = ExpressionConversionState::new(false);
     let phys_exprs = exprs
         .iter()
         .map(|expr| {
@@ -535,6 +533,35 @@ fn lower_exprs_with_ctx(
                 let out_name = unique_column_name();
                 let inner_expr = ExprIR::new(expr, OutputName::Alias(out_name.clone()));
                 let node_key = build_input_independent_node_with_ctx(&[inner_expr], ctx)?;
+                input_streams.insert(PhysStream::first(node_key));
+                transformed_exprs.push(ctx.expr_arena.add(AExpr::Column(out_name)));
+            },
+
+            AExpr::Function {
+                input: ref inner_exprs,
+                function: FunctionExpr::ConcatExpr(_rechunk),
+                options: _,
+            } => {
+                // We have to lower each expression separately as they might have different lengths.
+                let mut concat_streams = Vec::new();
+                let out_name = unique_column_name();
+                for inner_expr in inner_exprs {
+                    let (trans_input, trans_expr) =
+                        lower_exprs_with_ctx(input, &[inner_expr.node()], ctx)?;
+                    let select_expr =
+                        ExprIR::new(trans_expr[0], OutputName::Alias(out_name.clone()));
+                    concat_streams.push(build_select_stream_with_ctx(
+                        trans_input,
+                        &[select_expr],
+                        ctx,
+                    )?);
+                }
+
+                let output_schema = ctx.phys_sm[concat_streams[0].node].output_schema.clone();
+                let node_kind = PhysNodeKind::OrderedUnion {
+                    inputs: concat_streams,
+                };
+                let node_key = ctx.phys_sm.insert(PhysNode::new(output_schema, node_kind));
                 input_streams.insert(PhysStream::first(node_key));
                 transformed_exprs.push(ctx.expr_arena.add(AExpr::Column(out_name)));
             },
@@ -1032,6 +1059,8 @@ pub fn build_length_preserving_select_stream(
     let PhysNodeKind::Select { selectors, .. } = &mut ctx.phys_sm[out_stream.node].kind else {
         unreachable!()
     };
-    selectors.pop();
+    assert!(selectors.pop().unwrap().output_name() == &tmp_name);
+    let out_schema = Arc::make_mut(&mut phys_sm[out_stream.node].output_schema);
+    out_schema.shift_remove(tmp_name.as_ref()).unwrap();
     Ok(out_stream)
 }
