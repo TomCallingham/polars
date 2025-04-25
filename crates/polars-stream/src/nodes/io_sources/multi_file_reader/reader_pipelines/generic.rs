@@ -9,7 +9,7 @@ use polars_core::scalar::Scalar;
 use polars_core::schema::SchemaRef;
 use polars_error::PolarsResult;
 use polars_io::predicates::ScanIOPredicate;
-use polars_plan::dsl::ScanSource;
+use polars_plan::dsl::{ExtraColumnsPolicy, MissingColumnsPolicy, ScanSource};
 use polars_plan::plans::hive::HivePartitionsDf;
 use polars_utils::IdxSize;
 use polars_utils::slice_enum::Slice;
@@ -20,10 +20,9 @@ use crate::async_primitives::wait_group::{WaitGroup, WaitToken};
 use crate::morsel::Morsel;
 use crate::nodes::io_sources::multi_file_reader::bridge::BridgeRecvPort;
 use crate::nodes::io_sources::multi_file_reader::extra_ops::apply::ApplyExtraOps;
-use crate::nodes::io_sources::multi_file_reader::extra_ops::cast_columns::CastColumnsPolicy;
-use crate::nodes::io_sources::multi_file_reader::extra_ops::missing_columns::MissingColumnsPolicy;
+use crate::nodes::io_sources::multi_file_reader::extra_ops::missing_columns::initialize_missing_columns_policy;
 use crate::nodes::io_sources::multi_file_reader::extra_ops::{
-    ExtraOperations, SchemaNamesMatchPolicy,
+    ExtraOperations, apply_extra_columns_policy,
 };
 use crate::nodes::io_sources::multi_file_reader::initialization::slice::{
     ResolvedSliceInfo, resolve_to_positive_slice,
@@ -46,7 +45,7 @@ impl MultiScanTaskInitializer {
         skip_files_mask: Option<Bitmap>,
         predicate: Option<ScanIOPredicate>,
     ) -> PolarsResult<JoinHandle<PolarsResult<()>>> {
-        let verbose = self.config.verbose();
+        let verbose = self.config.verbose;
         let reader_capabilities = self.config.file_reader_builder.reader_capabilities();
 
         // Row index should only be pushed if we have a predicate or negative slice as there is a
@@ -95,19 +94,16 @@ impl MultiScanTaskInitializer {
             },
         };
 
-        let missing_columns_policy = if self.config.allow_missing_columns {
-            MissingColumnsPolicy::Insert
-        } else {
-            MissingColumnsPolicy::Raise
-        };
+        let cast_columns_policy = self.config.cast_columns_policy.clone();
+        let missing_columns_policy = self.config.missing_columns_policy.clone();
+        let include_file_paths = self.config.include_file_paths.clone();
 
         let extra_ops = ExtraOperations {
             row_index,
             pre_slice,
-            missing_columns_policy: missing_columns_policy.clone(),
-            // TODO: Expose config for this
-            cast_columns_policy: CastColumnsPolicy::ErrorOnMismatch,
-            include_file_paths: self.config.include_file_paths.clone(),
+            cast_columns_policy,
+            missing_columns_policy,
+            include_file_paths,
             predicate,
         };
 
@@ -244,9 +240,9 @@ impl MultiScanTaskInitializer {
                     hive_parts,
                     final_output_schema,
                     projected_file_schema,
-                    missing_columns_policy,
+                    missing_columns_policy: self.config.missing_columns_policy.clone(),
                     full_file_schema,
-                    check_schema_names: None,
+                    extra_columns_policy: self.config.extra_columns_policy.clone(),
                 },
                 num_pipelines,
                 verbose,
@@ -457,11 +453,17 @@ impl ReaderStarter {
 
             // Note: We do set_external_columns later below to avoid blocking this loop.
             let predicate = if extra_ops_post.predicate.is_some()
-                && reader_capabilities.contains(ReaderCapabilities::SPECIALIZED_FILTER)
+                && reader_capabilities.contains(ReaderCapabilities::PARTIAL_FILTER)
                 && extra_ops_post.row_index.is_none()
                 && extra_ops_post.pre_slice.is_none()
             {
-                extra_ops_post.predicate.take()
+                if reader_capabilities.contains(ReaderCapabilities::FULL_FILTER) {
+                    // If the reader can fully handle the predicate itself, let it do it itself.
+                    extra_ops_post.predicate.take()
+                } else {
+                    // Otherwise, we want to pass it and filter again afterwards.
+                    extra_ops_post.predicate.clone()
+                }
             } else {
                 None
             };
@@ -535,7 +537,7 @@ struct StartReaderArgsConstant {
     projected_file_schema: SchemaRef,
     missing_columns_policy: MissingColumnsPolicy,
     full_file_schema: SchemaRef,
-    check_schema_names: Option<SchemaNamesMatchPolicy>,
+    extra_columns_policy: ExtraColumnsPolicy,
 }
 
 struct StartReaderArgsPerFile {
@@ -556,7 +558,7 @@ async fn start_reader_impl(
         projected_file_schema,
         missing_columns_policy,
         full_file_schema,
-        check_schema_names,
+        extra_columns_policy,
     } = constant_args;
 
     let StartReaderArgsPerFile {
@@ -569,7 +571,7 @@ async fn start_reader_impl(
 
     let pre_slice_to_reader = begin_read_args.pre_slice.clone();
 
-    let file_schema_rx = if check_schema_names.is_some() {
+    let file_schema_rx = if !matches!(extra_columns_policy, ExtraColumnsPolicy::Ignore) {
         // Upstream should not have any reason to attach this.
         assert!(begin_read_args.callbacks.file_schema_tx.is_none());
         let (tx, rx) = connector::connector();
@@ -638,7 +640,8 @@ async fn start_reader_impl(
         }
 
         let mut extra_cols = vec![];
-        missing_columns_policy.initialize_policy(
+        initialize_missing_columns_policy(
+            &missing_columns_policy,
             &projected_file_schema,
             get_file_schema!().as_ref(),
             &mut extra_cols,
@@ -656,9 +659,9 @@ async fn start_reader_impl(
 
     let reader_handle = AbortOnDropHandle::new(reader_handle);
 
-    if let Some(policy) = check_schema_names {
+    if !matches!(extra_columns_policy, ExtraColumnsPolicy::Ignore) {
         if let Ok(this_file_schema) = file_schema_rx.unwrap().recv().await {
-            policy.apply_policy(full_file_schema, this_file_schema)?;
+            apply_extra_columns_policy(&extra_columns_policy, full_file_schema, this_file_schema)?;
         } else {
             drop(reader_output_port);
             return Err(reader_handle.await.unwrap_err());

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import math
 import os
+import sys
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
 from datetime import date, datetime, time, timedelta
@@ -47,6 +48,7 @@ from polars._utils.various import (
     _is_generator,
     no_default,
     parse_version,
+    qualified_type_name,
     scale_bytes,
     sphinx_accessor,
     warn_null_comparison,
@@ -109,7 +111,6 @@ with contextlib.suppress(ImportError):  # Module not available when building doc
     from polars.polars import PyDataFrame, PySeries
 
 if TYPE_CHECKING:
-    import sys
     from collections.abc import Collection, Generator, Mapping
 
     import jax
@@ -150,7 +151,10 @@ if TYPE_CHECKING:
     else:
         from typing_extensions import Self
 elif BUILDING_SPHINX_DOCS:
-    property = sphinx_accessor
+    # note: we assign this way to work around an autocomplete issue in ipython/jedi
+    # (ref: https://github.com/davidhalter/jedi/issues/2057)
+    current_module = sys.modules[__name__]
+    current_module.property = sphinx_accessor
 
 ArrayLike = Union[
     Sequence[Any],
@@ -1422,7 +1426,7 @@ class Series:
                         phys_arg._s.rechunk(in_place=True)
                     args.append(phys_arg._s.to_numpy_view())
                 else:
-                    msg = f"unsupported type {type(arg).__name__!r} for {arg!r}"
+                    msg = f"unsupported type {qualified_type_name(arg)!r} for {arg!r}"
                     raise TypeError(msg)
 
             # Get minimum dtype needed to be able to cast all input arguments to the
@@ -4950,7 +4954,9 @@ class Series:
 
         See Also
         --------
+        backward_fill
         fill_nan
+        forward_fill
 
         Examples
         --------
@@ -4983,6 +4989,44 @@ class Series:
             "z"
         ]
         """
+
+    def backward_fill(self, limit: int | None = None) -> Series:
+        """
+        Fill missing values with the next non-null value.
+
+        This is an alias of `.fill_null(strategy="backward")`.
+
+        Parameters
+        ----------
+        limit
+            The number of consecutive null values to backward fill.
+
+        See Also
+        --------
+        fill_null
+        forward_fill
+        shift
+        """
+        return self.fill_null(strategy="backward", limit=limit)
+
+    def forward_fill(self, limit: int | None = None) -> Series:
+        """
+        Fill missing values with the last non-null value.
+
+        This is an alias of `.fill_null(strategy="forward")`.
+
+        Parameters
+        ----------
+        limit
+            The number of consecutive null values to forward fill.
+
+        See Also
+        --------
+        backward_fill
+        fill_null
+        shift
+        """
+        return self.fill_null(strategy="forward", limit=limit)
 
     def floor(self) -> Series:
         """
@@ -6020,7 +6064,14 @@ class Series:
         """
 
     @unstable()
-    def rolling_skew(self, window_size: int, *, bias: bool = True) -> Series:
+    def rolling_skew(
+        self,
+        window_size: int,
+        *,
+        bias: bool = True,
+        min_samples: int | None = None,
+        center: bool = False,
+    ) -> Series:
         """
         Compute a rolling skew.
 
@@ -6037,6 +6088,15 @@ class Series:
             Integer size of the rolling window.
         bias
             If False, the calculations are corrected for statistical bias.
+        min_samples
+            The number of values in the window that should be non-null before computing
+            a result. If set to `None` (default), it will be set equal to `window_size`.
+        center
+            Set the labels at the center of the window.
+
+        See Also
+        --------
+        Series.skew
 
         Examples
         --------
@@ -6054,6 +6114,58 @@ class Series:
 
         >>> pl.Series([1, 4, 2]).skew(), pl.Series([4, 2, 9]).skew()
         (0.38180177416060584, 0.47033046033698594)
+        """
+
+    @unstable()
+    def rolling_kurtosis(
+        self,
+        window_size: int,
+        *,
+        fisher: bool = True,
+        bias: bool = True,
+        min_samples: int | None = None,
+        center: bool = False,
+    ) -> Series:
+        """
+        Compute a rolling kurtosis.
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        The window at a given row will include the row itself, and the `window_size - 1`
+        elements before it.
+
+        Parameters
+        ----------
+        window_size
+            Integer size of the rolling window.
+        fisher : bool, optional
+            If True, Fisher's definition is used (normal ==> 0.0). If False,
+            Pearson's definition is used (normal ==> 3.0).
+        bias : bool, optional
+            If False, the calculations are corrected for statistical bias.
+        min_samples
+            The number of values in the window that should be non-null before computing
+            a result. If set to `None` (default), it will be set equal to `window_size`.
+        center
+            Set the labels at the center of the window.
+
+        See Also
+        --------
+        Series.kurtosis
+
+        Examples
+        --------
+        >>> pl.Series([1, 4, 2, 9]).rolling_kurtosis(3)
+        shape: (4,)
+        Series: '' [f64]
+        [
+            null
+            null
+            -1.5
+            -1.5
+        ]
         """
 
     def sample(
@@ -6237,7 +6349,9 @@ class Series:
 
     def interpolate(self, method: InterpolationMethod = "linear") -> Series:
         """
-        Fill null values using interpolation.
+        Interpolate intermediate values.
+
+        Nulls at the beginning and end of the series remain null.
 
         Parameters
         ----------
@@ -6261,7 +6375,9 @@ class Series:
 
     def interpolate_by(self, by: IntoExpr) -> Series:
         """
-        Fill null values using interpolation based on another column.
+        Interpolate intermediate values with x-coordinate based on another column.
+
+        Nulls at the beginning and end of the series remain null.
 
         Parameters
         ----------
@@ -6539,7 +6655,7 @@ class Series:
         >>> s.kurtosis(fisher=False)
         1.9477376373212048
         >>> s.kurtosis(fisher=False, bias=False)
-        2.1040361802642726
+        2.1040361802642717
         """
         return self._s.kurtosis(fisher, bias)
 

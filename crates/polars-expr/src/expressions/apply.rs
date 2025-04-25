@@ -5,10 +5,6 @@ use polars_core::POOL;
 use polars_core::chunked_array::builder::get_list_builder;
 use polars_core::chunked_array::from_iterator_par::try_list_from_par_iter;
 use polars_core::prelude::*;
-#[cfg(feature = "parquet")]
-use polars_io::predicates::{BatchStats, StatsEvaluator};
-#[cfg(feature = "is_between")]
-use polars_ops::prelude::ClosedInterval;
 use rayon::prelude::*;
 
 use super::*;
@@ -94,16 +90,15 @@ impl ApplyExpr {
         mut ac: AggregationContext<'a>,
         ca: ListChunked,
     ) -> PolarsResult<AggregationContext<'a>> {
-        let all_unit_len = all_unit_length(&ca);
-        if all_unit_len && self.function_returns_scalar {
-            ac.with_agg_state(AggState::AggregatedScalar(
-                ca.explode().unwrap().into_column(),
-            ));
-            ac.with_update_groups(UpdateGroups::No);
+        let c = if self.function_returns_scalar {
+            ac.update_groups = UpdateGroups::No;
+            ca.explode().unwrap().into_column()
         } else {
-            ac.with_values(ca.into_column(), true, Some(&self.expr))?;
             ac.with_update_groups(UpdateGroups::WithSeriesLen);
-        }
+            ca.into_series().into()
+        };
+
+        ac.with_values_and_args(c, true, None, false, self.function_returns_scalar)?;
 
         Ok(ac)
     }
@@ -127,11 +122,14 @@ impl ApplyExpr {
     ) -> PolarsResult<AggregationContext<'a>> {
         let s = ac.get_values();
 
-        polars_ensure!(
-            !matches!(ac.agg_state(), AggState::AggregatedScalar(_)),
-            expr = self.expr,
-            ComputeError: "cannot aggregate, the column is already aggregated",
-        );
+        #[allow(clippy::nonminimal_bool)]
+        {
+            polars_ensure!(
+                !(matches!(ac.agg_state(), AggState::AggregatedScalar(_)) && !s.dtype().is_list() ) ,
+                expr = self.expr,
+                ComputeError: "cannot aggregate, the column is already aggregated",
+            );
+        }
 
         let name = s.name().clone();
         let agg = ac.aggregated();
@@ -225,7 +223,7 @@ impl ApplyExpr {
             },
         };
 
-        ac.with_values_and_args(c, aggregated, Some(&self.expr), true)?;
+        ac.with_values_and_args(c, aggregated, Some(&self.expr), true, self.is_scalar())?;
         Ok(ac)
     }
     fn apply_multiple_group_aware<'a>(
@@ -299,15 +297,6 @@ impl ApplyExpr {
         let ac = acs.swap_remove(0);
         self.finish_apply_groups(ac, ca)
     }
-}
-
-fn all_unit_length(ca: &ListChunked) -> bool {
-    assert_eq!(ca.chunks().len(), 1);
-
-    let list_arr = ca.downcast_iter().next().unwrap();
-    let offset = list_arr.offsets().as_slice();
-    // Note: Checking offset.last() == 0 handles the Null dtype - in that case the offsets can be (e.g. [0,0,0 ...])
-    (offset[offset.len() - 1] as usize) == list_arr.len() || offset[offset.len() - 1] == 0
 }
 
 fn check_map_output_len(input_len: usize, output_len: usize, expr: &Expr) -> PolarsResult<()> {
@@ -421,6 +410,7 @@ impl PhysicalExpr for ApplyExpr {
                             self.function.as_ref(),
                             &self.expr,
                             self.check_lengths,
+                            self.is_scalar(),
                         )
                     }
                 },
@@ -430,23 +420,6 @@ impl PhysicalExpr for ApplyExpr {
 
     fn to_field(&self, input_schema: &Schema) -> PolarsResult<Field> {
         self.expr.to_field(input_schema, Context::Default)
-    }
-    #[cfg(feature = "parquet")]
-    fn as_stats_evaluator(&self) -> Option<&dyn StatsEvaluator> {
-        let function = match &self.expr {
-            Expr::Function { function, .. } => function,
-            _ => return None,
-        };
-
-        match function {
-            FunctionExpr::Boolean(BooleanFunction::IsNull) => Some(self),
-            #[cfg(feature = "is_in")]
-            FunctionExpr::Boolean(BooleanFunction::IsIn { .. }) => Some(self),
-            #[cfg(feature = "is_between")]
-            FunctionExpr::Boolean(BooleanFunction::IsBetween { closed: _ }) => Some(self),
-            FunctionExpr::Boolean(BooleanFunction::IsNotNull) => Some(self),
-            _ => None,
-        }
     }
     fn as_partitioned_aggregator(&self) -> Option<&dyn PartitionedAggregation> {
         if self.inputs.len() == 1 && matches!(self.collect_groups, ApplyOptions::ElementWise) {
@@ -465,6 +438,7 @@ fn apply_multiple_elementwise<'a>(
     function: &dyn ColumnsUdf,
     expr: &Expr,
     check_lengths: bool,
+    returns_scalar: bool,
 ) -> PolarsResult<AggregationContext<'a>> {
     match acs.first().unwrap().agg_state() {
         // A fast path that doesn't drop groups of the first arg.
@@ -517,143 +491,9 @@ fn apply_multiple_elementwise<'a>(
 
             // Take the first aggregation context that as that is the input series.
             let mut ac = acs.swap_remove(0);
-            ac.with_values_and_args(c, aggregated, None, true)?;
+            ac.with_values_and_args(c, aggregated, None, true, returns_scalar)?;
             Ok(ac)
         },
-    }
-}
-
-#[cfg(feature = "parquet")]
-impl StatsEvaluator for ApplyExpr {
-    fn should_read(&self, stats: &BatchStats) -> PolarsResult<bool> {
-        let read = self.should_read_impl(stats)?;
-        Ok(read)
-    }
-}
-
-#[cfg(feature = "parquet")]
-impl ApplyExpr {
-    fn should_read_impl(&self, stats: &BatchStats) -> PolarsResult<bool> {
-        let (function, input) = match &self.expr {
-            Expr::Function {
-                function, input, ..
-            } => (function, input),
-            _ => return Ok(true),
-        };
-        // Ensure the input of the function is only a `col(..)`.
-        // If it does any arithmetic the code below is flawed.
-        if !matches!(input[0], Expr::Column(_)) {
-            return Ok(true);
-        }
-
-        match function {
-            FunctionExpr::Boolean(BooleanFunction::IsNull) => {
-                let root = expr_to_leaf_column_name(&self.expr)?;
-
-                match stats.get_stats(&root).ok() {
-                    Some(st) => match st.null_count() {
-                        Some(0) => Ok(false),
-                        _ => Ok(true),
-                    },
-                    None => Ok(true),
-                }
-            },
-            FunctionExpr::Boolean(BooleanFunction::IsNotNull) => {
-                let root = expr_to_leaf_column_name(&self.expr)?;
-
-                match stats.get_stats(&root).ok() {
-                    Some(st) => match st.null_count() {
-                        Some(null_count)
-                            if stats
-                                .num_rows()
-                                .is_some_and(|num_rows| num_rows == null_count) =>
-                        {
-                            Ok(false)
-                        },
-                        _ => Ok(true),
-                    },
-                    None => Ok(true),
-                }
-            },
-            #[cfg(feature = "is_in")]
-            FunctionExpr::Boolean(BooleanFunction::IsIn { .. }) => {
-                let should_read = || -> Option<bool> {
-                    let root = expr_to_leaf_column_name(&input[0]).ok()?;
-
-                    let input = self.inputs[1].evaluate_inline()?;
-                    let input = input.as_materialized_series();
-
-                    let st = stats.get_stats(&root).ok()?;
-                    let min = st.to_min()?;
-                    let max = st.to_max()?;
-
-                    if max.get(0).unwrap() == min.get(0).unwrap() {
-                        let one_equals =
-                            |value: &Series| Some(ChunkCompareEq::equal(input, value).ok()?.any());
-                        return one_equals(min);
-                    }
-
-                    let smaller = ChunkCompareIneq::lt(input, min).ok()?;
-                    let bigger = ChunkCompareIneq::gt(input, max).ok()?;
-
-                    Some(!(smaller | bigger).all())
-                };
-
-                Ok(should_read().unwrap_or(true))
-            },
-            #[cfg(feature = "is_between")]
-            FunctionExpr::Boolean(BooleanFunction::IsBetween { closed }) => {
-                let should_read = || -> Option<bool> {
-                    let root: PlSmallStr = expr_to_leaf_column_name(&input[0]).ok()?;
-
-                    let left = self.inputs[1]
-                        .evaluate_inline()?
-                        .as_materialized_series()
-                        .clone();
-                    let right = self.inputs[2]
-                        .evaluate_inline()?
-                        .as_materialized_series()
-                        .clone();
-
-                    let st = stats.get_stats(&root).ok()?;
-                    let min = st.to_min()?;
-                    let max = st.to_max()?;
-
-                    // don't read the row_group anyways as
-                    // the condition will evaluate to false.
-                    // e.g. in_between(10, 5)
-                    if ChunkCompareIneq::gt(&left, &right).ok()?.all() {
-                        return Some(false);
-                    }
-
-                    let (left_open, right_open) = match closed {
-                        ClosedInterval::None => (true, true),
-                        ClosedInterval::Both => (false, false),
-                        ClosedInterval::Left => (false, true),
-                        ClosedInterval::Right => (true, false),
-                    };
-                    // check the right limit of the interval.
-                    // if the end is open, we should be stricter (lt_eq instead of lt).
-                    if right_open && ChunkCompareIneq::lt_eq(&right, min).ok()?.all()
-                        || !right_open && ChunkCompareIneq::lt(&right, min).ok()?.all()
-                    {
-                        return Some(false);
-                    }
-                    // we couldn't conclude anything using the right limit,
-                    // check the left limit of the interval
-                    if left_open && ChunkCompareIneq::gt_eq(&left, max).ok()?.all()
-                        || !left_open && ChunkCompareIneq::gt(&left, max).ok()?.all()
-                    {
-                        return Some(false);
-                    }
-                    // read the row_group
-                    Some(true)
-                };
-
-                Ok(should_read().unwrap_or(true))
-            },
-            _ => Ok(true),
-        }
     }
 }
 

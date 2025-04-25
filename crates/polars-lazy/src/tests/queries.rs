@@ -1761,7 +1761,10 @@ fn test_is_in() -> PolarsResult<()> {
         .clone()
         .lazy()
         .group_by_stable([col("fruits")])
-        .agg([col("cars").is_in(col("cars").filter(col("cars").eq(lit("beetle"))), false)])
+        .agg([col("cars").is_in(
+            col("cars").filter(col("cars").eq(lit("beetle"))).implode(),
+            false,
+        )])
         .collect()?;
     let out = out.column("cars").unwrap();
     let out = out.explode()?;
@@ -1775,7 +1778,10 @@ fn test_is_in() -> PolarsResult<()> {
     let out = df
         .lazy()
         .group_by_stable([col("fruits")])
-        .agg([col("cars").is_in(lit(Series::new("a".into(), ["beetle", "vw"])), false)])
+        .agg([col("cars").is_in(
+            lit(Series::new("a".into(), ["beetle", "vw"])).implode(),
+            false,
+        )])
         .collect()?;
 
     let out = out.column("cars").unwrap();
@@ -1946,5 +1952,25 @@ fn test_sort_maintain_order_true() -> PolarsResult<()> {
         "A" => [1, 1, 1],
         "B" => ["A", "B", "C"],
     ]?));
+    Ok(())
+}
+
+#[test]
+fn test_over_with_options_empty_join() -> PolarsResult<()> {
+    let empty_df = DataFrame::new(vec![
+        Series::new_empty("a".into(), &DataType::Int32).into(),
+        Series::new_empty("b".into(), &DataType::Int32).into(),
+    ])?;
+
+    let empty_df_out = empty_df
+        .lazy()
+        .select([col("b").over_with_options([col("a")], Option::None, WindowMapping::Join)])
+        .collect()?;
+
+    let f1: Field = Field::new("b".into(), DataType::List(Box::new(DataType::Int32)));
+    let sc: Schema = Schema::from_iter(vec![f1]);
+
+    assert_eq!(&**empty_df_out.schema(), &sc);
+
     Ok(())
 }

@@ -1,5 +1,6 @@
 use polars_core::prelude::*;
 use polars_utils::idx_vec::UnitVec;
+use polars_utils::slice_enum::Slice;
 use recursive::recursive;
 
 use crate::prelude::*;
@@ -11,6 +12,7 @@ mod inner {
 
     pub struct SlicePushDown {
         pub streaming: bool,
+        #[expect(unused)]
         pub new_streaming: bool,
         scratch: UnitVec<Node>,
     }
@@ -38,6 +40,15 @@ pub(super) use inner::SlicePushDown;
 struct State {
     offset: i64,
     len: IdxSize,
+}
+
+impl State {
+    fn to_slice_enum(self) -> Slice {
+        let offset = self.offset;
+        let len: usize = usize::try_from(self.len).unwrap();
+
+        (offset, len).into()
+    }
 }
 
 /// Can push down slice when:
@@ -202,11 +213,11 @@ impl SlicePushDown {
                 file_info,
                 hive_parts,
                 output_schema,
-                mut file_options,
+                mut unified_scan_args,
                 predicate,
                 scan_type,
-            }, Some(state)) if matches!(&*scan_type, FileScan::Csv { .. }) && predicate.is_none() && self.new_streaming =>  {
-                file_options.pre_slice = Some((state.offset, state.len as usize));
+            }, Some(state)) if matches!(&*scan_type, FileScan::Csv { .. }) && predicate.is_none()  =>  {
+                unified_scan_args.pre_slice = Some(state.to_slice_enum());
 
                 let lp = Scan {
                     sources,
@@ -214,47 +225,24 @@ impl SlicePushDown {
                     hive_parts,
                     output_schema,
                     scan_type,
-                    file_options,
+                    unified_scan_args,
                     predicate,
                 };
 
                 Ok(lp)
             },
-            #[cfg(feature = "csv")]
-            (Scan {
-                sources,
-                file_info,
-                hive_parts,
-                output_schema,
-                mut file_options,
-                predicate,
-                scan_type,
-            }, Some(state)) if predicate.is_none() && state.offset >= 0 && matches!(&*scan_type, FileScan::Csv{..}) =>  {
-                file_options.pre_slice = Some((0, state.offset as usize + state.len as usize));
 
-                let lp = Scan {
-                    sources,
-                    file_info,
-                    hive_parts,
-                    output_schema,
-                    scan_type,
-                    file_options,
-                    predicate,
-                };
-
-                self.no_pushdown_finish_opt(lp, Some(state), lp_arena)
-            },
             #[cfg(feature = "json")]
             (Scan {
                 sources,
                 file_info,
                 hive_parts,
                 output_schema,
-                mut file_options,
+                mut unified_scan_args,
                 predicate,
                 scan_type,
-            }, Some(state)) if predicate.is_none() && self.new_streaming && matches!(&*scan_type, FileScan::NDJson {.. }) =>  {
-                file_options.pre_slice = Some((state.offset, state.len as usize));
+            }, Some(state)) if predicate.is_none() && matches!(&*scan_type, FileScan::NDJson {.. }) =>  {
+                unified_scan_args.pre_slice = Some(state.to_slice_enum());
 
                 let lp = Scan {
                     sources,
@@ -262,7 +250,7 @@ impl SlicePushDown {
                     hive_parts,
                     output_schema,
                     scan_type,
-                    file_options,
+                    unified_scan_args,
                     predicate,
                 };
 
@@ -274,11 +262,11 @@ impl SlicePushDown {
                 file_info,
                 hive_parts,
                 output_schema,
-                mut file_options,
+                mut unified_scan_args,
                 predicate,
                 scan_type,
             }, Some(state)) if predicate.is_none() && matches!(&*scan_type, FileScan::Parquet { .. }) =>  {
-                file_options.pre_slice = Some((state.offset, state.len as usize));
+                unified_scan_args.pre_slice = Some(state.to_slice_enum());
 
                 let lp = Scan {
                     sources,
@@ -286,7 +274,7 @@ impl SlicePushDown {
                     hive_parts,
                     output_schema,
                     scan_type,
-                    file_options,
+                    unified_scan_args,
                     predicate,
                 };
 
@@ -299,11 +287,11 @@ impl SlicePushDown {
                 file_info,
                 hive_parts,
                 output_schema,
-                mut file_options,
+                mut unified_scan_args,
                 predicate,
                 scan_type,
-            }, Some(state)) if self.new_streaming && predicate.is_none() && matches!(&*scan_type, FileScan::Ipc{..})=>  {
-                file_options.pre_slice = Some((state.offset, state.len as usize));
+            }, Some(state)) if predicate.is_none() && matches!(&*scan_type, FileScan::Ipc{..})=>  {
+                unified_scan_args.pre_slice = Some(state.to_slice_enum());
 
                 let lp = Scan {
                     sources,
@@ -311,7 +299,7 @@ impl SlicePushDown {
                     hive_parts,
                     output_schema,
                     scan_type,
-                    file_options,
+                    unified_scan_args,
                     predicate,
                 };
 
@@ -324,11 +312,11 @@ impl SlicePushDown {
                 file_info,
                 hive_parts,
                 output_schema,
-                file_options: mut options,
+                mut unified_scan_args,
                 predicate,
                 scan_type
             }, Some(state)) if state.offset == 0 && predicate.is_none() => {
-                options.pre_slice = Some((0, state.len as usize));
+                unified_scan_args.pre_slice = Some(state.to_slice_enum());
 
                 let lp = Scan {
                     sources,
@@ -336,7 +324,7 @@ impl SlicePushDown {
                     hive_parts,
                     output_schema,
                     predicate,
-                    file_options: options,
+                    unified_scan_args,
                     scan_type
                 };
 

@@ -24,7 +24,7 @@ impl MultiScanTaskInitializer {
                     self.config.projected_file_schema.as_ref(),
                     hive_parts.schema(),
                     hive_parts,
-                    self.config.verbose(),
+                    self.config.verbose,
                 )?;
 
                 return Ok((
@@ -117,7 +117,7 @@ fn scan_predicate_to_mask(
 
     if verbose {
         eprintln!(
-            "[MultiScan]: Predicate pushdown allows skipping {} / {} sources",
+            "[MultiScan]: Predicate pushdown allows skipping {} / {} files",
             mask.set_bits(),
             mask.len()
         );

@@ -164,7 +164,9 @@ impl PhysicalExpr for AggregationExpr {
         let mut ac = self.input.evaluate_on_groups(df, groups, state)?;
         // don't change names by aggregations as is done in polars-core
         let keep_name = ac.get_values().name().clone();
-        polars_ensure!(!matches!(ac.agg_state(), AggState::Literal(_)), ComputeError: "cannot aggregate a literal");
+
+        // Literals cannot be aggregated except for implode.
+        polars_ensure!((!matches!(ac.agg_state(), AggState::Literal(_)) || matches!(self.agg_type.groupby, GroupByMethod::Implode)), ComputeError: "cannot aggregate a literal");
 
         if let AggregatedScalar(_) = ac.agg_state() {
             match self.agg_type.groupby {
@@ -578,7 +580,7 @@ impl PartitionedAggregation for AggregationExpr {
                         let mask = agg_count.equal(0 as IdxSize);
                         let agg_count = agg_count.set(&mask, None).unwrap().into_series();
 
-                        let agg_s = &agg_s / &agg_count;
+                        let agg_s = &agg_s / &agg_count.cast(agg_s.dtype()).unwrap();
                         Ok(agg_s?.with_name(new_name).into_column())
                     },
                     _ => Ok(Column::full_null(

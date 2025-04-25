@@ -1238,3 +1238,33 @@ def test_partitioned_group_by_21634(partition_limit: int) -> None:
         "grp": [1],
         "literal": [True],
     }
+
+
+def test_group_by_cse_dup_key_alias_22238() -> None:
+    df = pl.LazyFrame({"a": [1, 1, 2, 2, -1], "x": [0, 1, 2, 3, 10]})
+    result = df.group_by(
+        pl.col("a").abs(),
+        pl.col("a").abs().alias("a_with_alias"),
+    ).agg(pl.col("x").sum())
+    assert_frame_equal(
+        result.collect(),
+        pl.DataFrame({"a": [1, 2], "a_with_alias": [1, 2], "x": [11, 5]}),
+        check_row_order=False,
+    )
+
+
+def test_group_by_22328() -> None:
+    N = 20
+
+    df1 = pl.select(
+        x=pl.repeat(1, N // 2).append(pl.repeat(2, N // 2)).shuffle(),
+        y=pl.lit(3.0, pl.Float32),
+    ).lazy()
+
+    df2 = pl.select(x=pl.repeat(4, N)).lazy()
+
+    assert (
+        df2.join(df1.group_by("x").mean().with_columns(z="y"), how="left", on="x")
+        .with_columns(pl.col("z").fill_null(0))
+        .collect()
+    ).shape == (20, 3)
