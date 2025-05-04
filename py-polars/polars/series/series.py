@@ -89,8 +89,10 @@ from polars.dependencies import (
     _check_for_numpy,
     _check_for_pandas,
     _check_for_pyarrow,
+    _check_for_torch,
     altair,
     import_optional,
+    torch,
 )
 from polars.dependencies import numpy as np
 from polars.dependencies import pandas as pd
@@ -115,7 +117,6 @@ if TYPE_CHECKING:
 
     import jax
     import numpy.typing as npt
-    import torch
 
     from polars import DataFrame, DataType, Expr
     from polars._typing import (
@@ -136,6 +137,7 @@ if TYPE_CHECKING:
         PythonLiteral,
         RankMethod,
         RollingInterpolationMethod,
+        RoundMode,
         SearchSortedSide,
         SeriesBuffers,
         SingleIndexSelector,
@@ -323,6 +325,13 @@ class Series:
             if dtype is not None:
                 self._s = self.cast(dtype, strict=strict)._s
 
+        elif _check_for_torch(values) and isinstance(values, torch.Tensor):
+            self._s = numpy_to_pyseries(
+                name, values.numpy(force=False), strict=strict, nan_to_null=nan_to_null
+            )
+            if dtype is not None:
+                self._s = self.cast(dtype, strict=strict)._s
+
         elif _check_for_pyarrow(values) and isinstance(
             values, (pa.Array, pa.ChunkedArray)
         ):
@@ -393,6 +402,10 @@ class Series:
         garbage collect the heap pointer, but not its contents.
         """
         return cls._from_pyseries(PySeries._import_arrow_from_c(name, pointers))
+
+    @classmethod
+    def _import(cls, pointer: int) -> Self:
+        return cls._from_pyseries(PySeries._import(pointer))
 
     def _export_arrow_to_c(self, out_ptr: int, out_schema_ptr: int) -> None:
         """
@@ -656,32 +669,80 @@ class Series:
     def __len__(self) -> int:
         return self.len()
 
-    def __and__(self, other: Any) -> Self:
+    @overload
+    def __and__(self, other: Expr) -> Expr: ...
+
+    @overload
+    def __and__(self, other: Any) -> Series: ...
+
+    def __and__(self, other: Any) -> Expr | Series:
+        if isinstance(other, pl.Expr):
+            return F.lit(self) & other
         if not isinstance(other, Series):
             other = Series([other])
         return self._from_pyseries(self._s.bitand(other._s))
 
-    def __rand__(self, other: Any) -> Series:
+    @overload
+    def __rand__(self, other: Expr) -> Expr: ...
+
+    @overload
+    def __rand__(self, other: Any) -> Series: ...
+
+    def __rand__(self, other: Any) -> Expr | Series:
+        if isinstance(other, pl.Expr):
+            return other & F.lit(self)
         if not isinstance(other, Series):
             other = Series([other])
         return other & self
 
-    def __or__(self, other: Any) -> Self:
+    @overload
+    def __or__(self, other: Expr) -> Expr: ...
+
+    @overload
+    def __or__(self, other: Any) -> Series: ...
+
+    def __or__(self, other: Any) -> Expr | Series:
+        if isinstance(other, pl.Expr):
+            return F.lit(self) | other
         if not isinstance(other, Series):
             other = Series([other])
         return self._from_pyseries(self._s.bitor(other._s))
 
-    def __ror__(self, other: Any) -> Series:
+    @overload
+    def __ror__(self, other: Expr) -> Expr: ...
+
+    @overload
+    def __ror__(self, other: Any) -> Series: ...
+
+    def __ror__(self, other: Any) -> Expr | Series:
+        if isinstance(other, pl.Expr):
+            return other | F.lit(self)
         if not isinstance(other, Series):
             other = Series([other])
         return other | self
 
-    def __xor__(self, other: Any) -> Self:
+    @overload
+    def __xor__(self, other: Expr) -> Expr: ...
+
+    @overload
+    def __xor__(self, other: Any) -> Series: ...
+
+    def __xor__(self, other: Any) -> Expr | Series:
+        if isinstance(other, pl.Expr):
+            return F.lit(self) ^ other
         if not isinstance(other, Series):
             other = Series([other])
         return self._from_pyseries(self._s.bitxor(other._s))
 
-    def __rxor__(self, other: Any) -> Series:
+    @overload
+    def __rxor__(self, other: Expr) -> Expr: ...
+
+    @overload
+    def __rxor__(self, other: Any) -> Series: ...
+
+    def __rxor__(self, other: Any) -> Expr | Series:
+        if isinstance(other, pl.Expr):
+            return other ^ F.lit(self)
         if not isinstance(other, Series):
             other = Series([other])
         return other ^ self
@@ -5066,7 +5127,7 @@ class Series:
         ]
         """
 
-    def round(self, decimals: int = 0) -> Series:
+    def round(self, decimals: int = 0, mode: RoundMode = "half_to_even") -> Series:
         """
         Round underlying floating point data by `decimals` digits.
 

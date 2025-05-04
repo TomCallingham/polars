@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from polars.dependencies import numpy as np
     from polars.dependencies import pandas as pd
     from polars.dependencies import pyarrow as pa
+    from polars.dependencies import torch
     from polars.lazyframe.engine_config import GPUEngine
     from polars.selectors import _selector_proxy_
 
@@ -129,6 +130,7 @@ PivotAgg: TypeAlias = Literal[
 ]
 RankMethod: TypeAlias = Literal["average", "min", "max", "dense", "ordinal", "random"]
 Roll: TypeAlias = Literal["raise", "forward", "backward"]
+RoundMode: TypeAlias = Literal["half_to_even", "half_away_from_zero"]
 SerializationFormat: TypeAlias = Literal["binary", "json"]
 Endianness: TypeAlias = Literal["little", "big"]
 SizeUnit: TypeAlias = Literal[
@@ -208,6 +210,7 @@ FrameInitTypes: TypeAlias = Union[
     "pd.DataFrame",
     "ArrowArrayExportable",
     "ArrowStreamExportable",
+    "torch.Tensor",
 ]
 
 # Excel IO
@@ -311,6 +314,8 @@ MultiColSelector: TypeAlias = Union[MultiIndexSelector, MultiNameSelector, Boole
 EngineType: TypeAlias = Union[
     Literal["auto", "in-memory", "streaming", "gpu"], "GPUEngine"
 ]
+
+PlanStage: TypeAlias = Literal["ir", "physical"]
 
 FileSource: TypeAlias = Union[
     str,

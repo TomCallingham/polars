@@ -88,9 +88,11 @@ from polars.dependencies import (
     _check_for_numpy,
     _check_for_pandas,
     _check_for_pyarrow,
+    _check_for_torch,
     altair,
     great_tables,
     import_optional,
+    torch,
 )
 from polars.dependencies import numpy as np
 from polars.dependencies import pandas as pd
@@ -123,7 +125,6 @@ if TYPE_CHECKING:
     import jax
     import numpy.typing as npt
     import pyiceberg
-    import torch
     from great_tables import GT
     from xlsxwriter import Workbook
     from xlsxwriter.worksheet import Worksheet
@@ -406,6 +407,16 @@ class DataFrame:
                 data, schema=schema, schema_overrides=schema_overrides, strict=strict
             )
 
+        elif _check_for_torch(data) and isinstance(data, torch.Tensor):
+            self._df = numpy_to_pydf(
+                data.numpy(force=False),
+                schema=schema,
+                schema_overrides=schema_overrides,
+                strict=strict,
+                orient=orient,
+                nan_to_null=nan_to_null,
+            )
+
         elif (
             not hasattr(data, "__arrow_c_stream__")
             and not isinstance(data, Sized)
@@ -602,6 +613,10 @@ class DataFrame:
         """Replace a column by a new Series (in place)."""
         self._df.replace(column, new_column._s)
         return self
+
+    @classmethod
+    def _import_columns(cls, pointer: int, width: int) -> DataFrame:
+        return cls._from_pydf(PyDataFrame._import_columns(pointer, width))
 
     @property
     @unstable()
@@ -4877,7 +4892,7 @@ class DataFrame:
 
     def insert_column(self, index: int, column: IntoExprColumn) -> DataFrame:
         """
-        Insert a Series at a certain column index.
+        Insert a Series (or expression) at a certain column index.
 
         This operation is in place.
 
@@ -4890,6 +4905,8 @@ class DataFrame:
 
         Examples
         --------
+        Insert a new Series column at the given index:
+
         >>> df = pl.DataFrame({"foo": [1, 2, 3], "bar": [4, 5, 6]})
         >>> s = pl.Series("baz", [97, 98, 99])
         >>> df.insert_column(1, s)
@@ -4904,26 +4921,23 @@ class DataFrame:
         │ 3   ┆ 99  ┆ 6   │
         └─────┴─────┴─────┘
 
+        Insert a new expression column at the given index:
+
         >>> df = pl.DataFrame(
-        ...     {
-        ...         "a": [1, 2, 3, 4],
-        ...         "b": [0.5, 4, 10, 13],
-        ...         "c": [True, True, False, True],
-        ...     }
+        ...     {"a": [2, 4, 2], "b": [0.5, 4, 10], "c": ["xx", "yy", "zz"]}
         ... )
-        >>> s = pl.Series("d", [-2.5, 15, 20.5, 0])
-        >>> df.insert_column(3, s)
-        shape: (4, 4)
-        ┌─────┬──────┬───────┬──────┐
-        │ a   ┆ b    ┆ c     ┆ d    │
-        │ --- ┆ ---  ┆ ---   ┆ ---  │
-        │ i64 ┆ f64  ┆ bool  ┆ f64  │
-        ╞═════╪══════╪═══════╪══════╡
-        │ 1   ┆ 0.5  ┆ true  ┆ -2.5 │
-        │ 2   ┆ 4.0  ┆ true  ┆ 15.0 │
-        │ 3   ┆ 10.0 ┆ false ┆ 20.5 │
-        │ 4   ┆ 13.0 ┆ true  ┆ 0.0  │
-        └─────┴──────┴───────┴──────┘
+        >>> expr = (pl.col("b") / pl.col("a")).alias("b_div_a")
+        >>> df.insert_column(2, expr)
+        shape: (3, 4)
+        ┌─────┬──────┬─────────┬─────┐
+        │ a   ┆ b    ┆ b_div_a ┆ c   │
+        │ --- ┆ ---  ┆ ---     ┆ --- │
+        │ i64 ┆ f64  ┆ f64     ┆ str │
+        ╞═════╪══════╪═════════╪═════╡
+        │ 2   ┆ 0.5  ┆ 0.25    ┆ xx  │
+        │ 4   ┆ 4.0  ┆ 1.0     ┆ yy  │
+        │ 2   ┆ 10.0 ┆ 5.0     ┆ zz  │
+        └─────┴──────┴─────────┴─────┘
         """
         if (original_index := index) < 0:
             index = self.width + index
@@ -7298,8 +7312,8 @@ class DataFrame:
         coalesce
             Coalescing behavior (merging of `on` / `left_on` / `right_on` columns):
 
-            - True: -> Always coalesce join columns.
-            - False: -> Never coalesce join columns.
+            - *True*: Always coalesce join columns.
+            - *False*: Never coalesce join columns.
 
             Note that joining on any other expressions than `col`
             will turn off coalescing.
@@ -7577,26 +7591,28 @@ class DataFrame:
             DataFrame to join with.
         on
             Name(s) of the join columns in both DataFrames. If set, `left_on` and
-            `right_on` should be None. This should not be specified if `how="cross"`.
+            `right_on` should be None. This should not be specified if `how='cross'`.
         how : {'inner', 'left', 'right', 'full', 'semi', 'anti', 'cross'}
             Join strategy.
 
-            * *inner*
-                Returns rows that have matching values in both tables
-            * *left*
-                Returns all rows from the left table, and the matched rows from the
-                right table
-            * *right*
-                Returns all rows from the right table, and the matched rows from the
-                left table
-            * *full*
-                Returns all rows when there is a match in either left or right table
-            * *cross*
-                Returns the Cartesian product of rows from both tables
-            * *semi*
-                Returns rows from the left table that have a match in the right table.
-            * *anti*
-                Returns rows from the left table that have no match in the right table.
+            .. list-table ::
+               :header-rows: 0
+
+               * - **inner**
+                 - *(Default)* Returns rows that have matching values in both tables.
+               * - **left**
+                 - Returns all rows from the left table, and the matched rows from
+                   the right table.
+               * - **full**
+                 - Returns all rows when there is a match in either left or right.
+               * - **cross**
+                 - Returns the Cartesian product of rows from both tables
+               * - **semi**
+                 - Returns rows from the left table that have a match in the right
+                   table.
+               * - **anti**
+                 - Returns rows from the left table that have no match in the right
+                   table.
 
         left_on
             Name(s) of the left join column(s).
@@ -7607,14 +7623,18 @@ class DataFrame:
         validate: {'m:m', 'm:1', '1:m', '1:1'}
             Checks if join is of specified type.
 
-                * *many_to_many*
-                    “m:m”: default, does not result in checks
-                * *one_to_one*
-                    “1:1”: check if join keys are unique in both left and right datasets
-                * *one_to_many*
-                    “1:m”: check if join keys are unique in left dataset
-                * *many_to_one*
-                    “m:1”: check if join keys are unique in right dataset
+            .. list-table ::
+               :header-rows: 0
+
+               * - **m:m**
+                 - *(Default)* Many-to-many (default). Does not result in checks.
+               * - **1:1**
+                 - One-to-one. Checks if join keys are unique in both left and
+                   right datasets.
+               * - **1:m**
+                 - One-to-many. Checks if join keys are unique in left dataset.
+               * - **m:1**
+                 - Many-to-one. Check if join keys are unique in right dataset.
 
             .. note::
                 This is currently not supported by the streaming engine.
@@ -7624,31 +7644,40 @@ class DataFrame:
         coalesce
             Coalescing behavior (merging of join columns).
 
-            - None: -> join specific.
-            - True: -> Always coalesce join columns.
-            - False: -> Never coalesce join columns.
+            .. list-table ::
+               :header-rows: 0
+
+               * - **None**
+                 - *(Default)* Coalesce unless `how='full'` is specified.
+               * - **True**
+                 - Always coalesce join columns.
+               * - **False**
+                 - Never coalesce join columns.
 
             .. note::
                 Joining on any other expressions than `col`
                 will turn off coalescing.
         maintain_order : {'none', 'left', 'right', 'left_right', 'right_left'}
             Which DataFrame row order to preserve, if any.
-            Do not rely on any observed ordering without explicitly
-            setting this parameter, as your code may break in a future release.
-            Not specifying any ordering can improve performance
+            Do not rely on any observed ordering without explicitly setting this
+            parameter, as your code may break in a future release.
+            Not specifying any ordering can improve performance.
             Supported for inner, left, right and full joins
 
-            * *none*
-                No specific ordering is desired. The ordering might differ across
-                Polars versions or even between different runs.
-            * *left*
-                Preserves the order of the left DataFrame.
-            * *right*
-                Preserves the order of the right DataFrame.
-            * *left_right*
-                First preserves the order of the left DataFrame, then the right.
-            * *right_left*
-                First preserves the order of the right DataFrame, then the left.
+            .. list-table ::
+               :header-rows: 0
+
+               * - **none**
+                 - *(Default)* No specific ordering is desired. The ordering might
+                   differ across Polars versions or even between different runs.
+               * - **left**
+                 - Preserves the order of the left DataFrame.
+               * - **right**
+                 - Preserves the order of the right DataFrame.
+               * - **left_right**
+                 - First preserves the order of the left DataFrame, then the right.
+               * - **right_left**
+                 - First preserves the order of the right DataFrame, then the left.
 
         See Also
         --------

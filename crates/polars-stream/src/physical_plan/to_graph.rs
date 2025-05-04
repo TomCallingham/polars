@@ -381,7 +381,11 @@ fn to_graph_rec<'a>(
             }
         },
 
-        InMemoryMap { input, map } => {
+        InMemoryMap {
+            input,
+            map,
+            format_str: _,
+        } => {
             let input_schema = ctx.phys_sm[input.node].output_schema.clone();
             let input_key = to_graph_rec(input.node, ctx)?;
             ctx.graph.add_node(
@@ -549,22 +553,6 @@ fn to_graph_rec<'a>(
                 )),
                 [],
             )
-        },
-
-        FileScan { scan_type, .. } => {
-            use polars_plan::prelude::FileScan;
-
-            match scan_type.as_ref() {
-                #[cfg(feature = "parquet")]
-                FileScan::Parquet { .. } => unreachable!(),
-                #[cfg(feature = "ipc")]
-                FileScan::Ipc { .. } => unreachable!(),
-                #[cfg(feature = "csv")]
-                FileScan::Csv { .. } => unreachable!(),
-                #[cfg(feature = "json")]
-                FileScan::NDJson { .. } => unreachable!(),
-                FileScan::Anonymous { .. } => todo!(),
-            }
         },
 
         GroupBy { input, key, aggs } => {
@@ -857,8 +845,7 @@ fn to_graph_rec<'a>(
                                 batch_size,
                             );
 
-                            let generator_init =
-                                callable.call1(args).map_err(polars_error::to_compute_err)?;
+                            let generator_init = callable.call1(args)?;
                             let generator = generator_init.get_item(0).map_err(
                                 |_| polars_err!(ComputeError: "expected tuple got {generator_init}"),
                             )?;
