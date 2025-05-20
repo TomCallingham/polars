@@ -73,13 +73,18 @@ fn write_scan(
     predicate: &Option<ExprIRDisplay<'_>>,
     pre_slice: Option<Slice>,
     row_index: Option<&RowIndex>,
+    scan_mem_id: Option<usize>,
 ) -> fmt::Result {
     write!(
         f,
         "{:indent$}{name} SCAN {}",
         "",
-        ScanSourcesDisplay(sources)
+        ScanSourcesDisplay(sources),
     )?;
+
+    if let Some(scan_mem_id) = scan_mem_id {
+        write!(f, " [id: {}]", scan_mem_id)?;
+    }
 
     let total_columns = total_columns - usize::from(row_index.is_some());
     if n_columns > 0 {
@@ -678,6 +683,7 @@ pub fn write_ir_non_recursive(
                     .n_rows
                     .map(|len| polars_utils::slice_enum::Slice::Positive { offset: 0, len }),
                 None,
+                None,
             )
         },
         IR::Slice {
@@ -704,6 +710,7 @@ pub fn write_ir_non_recursive(
             unified_scan_args,
             hive_parts: _,
             output_schema: _,
+            id: scan_mem_id,
         } => {
             let n_columns = unified_scan_args
                 .projection
@@ -723,6 +730,7 @@ pub fn write_ir_non_recursive(
                 &predicate,
                 unified_scan_args.pre_slice.clone(),
                 unified_scan_args.row_index.as_ref(),
+                Some(scan_mem_id.to_usize()),
             )
         },
         IR::DataFrameScan {
@@ -800,10 +808,18 @@ pub fn write_ir_non_recursive(
             keys,
             aggs,
             schema: _,
-            maintain_order: _,
+            maintain_order,
             options: _,
             apply,
-        } => write_group_by(f, indent, expr_arena, keys, aggs, apply.as_deref()),
+        } => write_group_by(
+            f,
+            indent,
+            expr_arena,
+            keys,
+            aggs,
+            apply.as_deref(),
+            *maintain_order,
+        ),
         IR::Join {
             input_left: _,
             input_right: _,
@@ -898,13 +914,18 @@ pub fn write_group_by(
     keys: &[ExprIR],
     aggs: &[ExprIR],
     apply: Option<&dyn DataFrameUdf>,
+    maintain_order: bool,
 ) -> fmt::Result {
     let sub_indent = indent + INDENT_INCREMENT;
     let keys = ExprIRSliceDisplay {
         exprs: keys,
         expr_arena,
     };
-    write!(f, "{:indent$}AGGREGATE", "")?;
+    write!(
+        f,
+        "{:indent$}AGGREGATE[maintain_order: {}]",
+        "", maintain_order
+    )?;
     if apply.is_some() {
         write!(f, "\n{:sub_indent$}MAP_GROUPS BY {keys}", "")?;
         write!(f, "\n{:sub_indent$}FROM", "")?;

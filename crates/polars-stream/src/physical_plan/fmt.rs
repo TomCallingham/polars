@@ -1,6 +1,5 @@
 use std::fmt::Write;
 
-use polars_ops::frame::JoinType;
 use polars_plan::dsl::PartitionVariantIR;
 use polars_plan::plans::expr_ir::ExprIR;
 use polars_plan::plans::{AExpr, EscapeLabel};
@@ -36,8 +35,9 @@ impl NodeStyle {
             | K::EquiJoin { .. }
             | K::SemiAntiJoin { .. }
             | K::InMemoryJoin { .. }
-            | K::MergeSorted { .. }
             | K::Multiplexer { .. } => Self::MemoryIntensive,
+            #[cfg(feature = "merge_sorted")]
+            K::MergeSorted { .. } => Self::MemoryIntensive,
             _ => Self::Generic,
         }
     }
@@ -429,18 +429,19 @@ fn visualize_plan_rec(
             let label = match phys_sm[node_key].kind {
                 PhysNodeKind::EquiJoin { .. } => "equi-join",
                 PhysNodeKind::InMemoryJoin { .. } => "in-memory-join",
+                PhysNodeKind::CrossJoin { .. } => "cross-join",
                 PhysNodeKind::SemiAntiJoin {
                     output_bool: false, ..
-                } if args.how == JoinType::Semi => "semi-join",
+                } if args.how.is_semi() => "semi-join",
                 PhysNodeKind::SemiAntiJoin {
                     output_bool: false, ..
-                } if args.how == JoinType::Anti => "anti-join",
+                } if args.how.is_anti() => "anti-join",
                 PhysNodeKind::SemiAntiJoin {
                     output_bool: true, ..
-                } if args.how == JoinType::Semi => "is-in",
+                } if args.how.is_semi() => "is-in",
                 PhysNodeKind::SemiAntiJoin {
                     output_bool: true, ..
-                } if args.how == JoinType::Anti => "is-not-in",
+                } if args.how.is_anti() => "is-not-in",
                 _ => unreachable!(),
             };
             let mut label = label.to_string();
@@ -469,6 +470,11 @@ fn visualize_plan_rec(
             }
             (label, &[*input_left, *input_right][..])
         },
+        PhysNodeKind::CrossJoin {
+            input_left,
+            input_right,
+            args: _,
+        } => ("cross-join".to_string(), &[*input_left, *input_right][..]),
         #[cfg(feature = "merge_sorted")]
         PhysNodeKind::MergeSorted {
             input_left,

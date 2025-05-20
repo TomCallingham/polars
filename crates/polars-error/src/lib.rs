@@ -314,6 +314,13 @@ impl PolarsError {
             error: Box::new(self),
         }
     }
+
+    pub fn remove_context(mut self) -> Self {
+        while let Self::Context { error, .. } = self {
+            self = *error;
+        }
+        self
+    }
 }
 
 pub fn map_err<E: Error>(error: E) -> PolarsError {
@@ -325,6 +332,11 @@ macro_rules! polars_err {
     ($variant:ident: $fmt:literal $(, $arg:expr)* $(,)?) => {
         $crate::__private::must_use(
             $crate::PolarsError::$variant(format!($fmt, $($arg),*).into())
+        )
+    };
+    ($variant:ident: $fmt:literal $(, $arg:expr)*, hint = $hint:literal) => {
+        $crate::__private::must_use(
+            $crate::PolarsError::$variant(format!(concat_str!($fmt, "\n\nHint: ", $hint), $($arg),*).into())
         )
     };
     ($variant:ident: $err:expr $(,)?) => {

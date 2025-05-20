@@ -361,6 +361,11 @@ impl DataFrame {
         Ok(unsafe { DataFrame::new_no_checks(length, columns) })
     }
 
+    pub fn new_from_index(&self, index: usize, height: usize) -> Self {
+        let cols = self.columns.iter().map(|c| c.new_from_index(index, height));
+        unsafe { Self::new_no_checks(height, cols.collect()) }
+    }
+
     /// Creates an empty `DataFrame` usable in a compile time context (such as static initializers).
     ///
     /// # Example
@@ -2858,6 +2863,7 @@ impl DataFrame {
     /// but we also don't want to rechunk here, as this operation is costly and would benefit the caller
     /// as well.
     pub fn iter_chunks_physical(&self) -> PhysRecordBatchIter<'_> {
+        debug_assert!(!self.should_rechunk());
         PhysRecordBatchIter {
             schema: Arc::new(
                 self.get_columns()
@@ -3342,7 +3348,8 @@ impl DataFrame {
         let df = DataFrame::from(rb);
         polars_ensure!(
             self.schema() == df.schema(),
-            SchemaMismatch: "cannot append record batch with different schema",
+            SchemaMismatch: "cannot append record batch with different schema\n\n
+        Got {:?}\nexpected: {:?}", df.schema(), self.schema(),
         );
         self.vstack_mut_owned_unchecked(df);
         Ok(())
