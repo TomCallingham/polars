@@ -4,9 +4,11 @@ use polars_core::schema::Schema;
 use polars_io::RowIndex;
 use polars_utils::format_list_truncated;
 use polars_utils::slice_enum::Slice;
+use polars_utils::unique_id::UniqueId;
 use recursive::recursive;
 
 use self::ir::dot::ScanSourcesDisplay;
+use crate::dsl::deletion::DeletionFilesList;
 use crate::prelude::*;
 
 const INDENT_INCREMENT: usize = 2;
@@ -73,7 +75,8 @@ fn write_scan(
     predicate: &Option<ExprIRDisplay<'_>>,
     pre_slice: Option<Slice>,
     row_index: Option<&RowIndex>,
-    scan_mem_id: Option<usize>,
+    scan_mem_id: Option<&UniqueId>,
+    deletion_files: Option<&DeletionFilesList>,
 ) -> fmt::Result {
     write!(
         f,
@@ -83,7 +86,7 @@ fn write_scan(
     )?;
 
     if let Some(scan_mem_id) = scan_mem_id {
-        write!(f, " [id: {}]", scan_mem_id)?;
+        write!(f, " [id: {scan_mem_id}]")?;
     }
 
     let total_columns = total_columns - usize::from(row_index.is_some());
@@ -107,6 +110,9 @@ fn write_scan(
         if row_index.offset != 0 {
             write!(f, " (offset: {})", row_index.offset)?;
         }
+    }
+    if let Some(deletion_files) = deletion_files {
+        write!(f, "\n{deletion_files}")?;
     }
     Ok(())
 }
@@ -534,6 +540,21 @@ impl Display for ExprIRDisplay<'_> {
                     write!(f, ".{}()", options.fmt_str)
                 }
             },
+            Eval {
+                expr,
+                evaluation,
+                variant,
+            } => {
+                let expr = self.with_root(expr);
+                let evaluation = self.with_root(evaluation);
+                match variant {
+                    EvalVariant::List => write!(f, "{expr}.list.eval({evaluation})"),
+                    EvalVariant::Cumulative { min_samples } => write!(
+                        f,
+                        "{expr}.cumulative_eval({evaluation}, min_samples={min_samples})"
+                    ),
+                }
+            },
             Slice {
                 input,
                 offset,
@@ -635,7 +656,7 @@ impl fmt::Debug for DynLiteralValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Int(v) => write!(f, "dyn int: {v}"),
-            Self::Float(v) => write!(f, "dyn float: {}", v),
+            Self::Float(v) => write!(f, "dyn float: {v}"),
             Self::Str(v) => write!(f, "dyn str: {v}"),
             Self::List(_) => todo!(),
         }
@@ -684,6 +705,7 @@ pub fn write_ir_non_recursive(
                     .map(|len| polars_utils::slice_enum::Slice::Positive { offset: 0, len }),
                 None,
                 None,
+                None,
             )
         },
         IR::Slice {
@@ -730,7 +752,8 @@ pub fn write_ir_non_recursive(
                 &predicate,
                 unified_scan_args.pre_slice.clone(),
                 unified_scan_args.row_index.as_ref(),
-                Some(scan_mem_id.to_usize()),
+                Some(scan_mem_id),
+                unified_scan_args.deletion_files.as_ref(),
             )
         },
         IR::DataFrameScan {

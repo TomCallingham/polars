@@ -24,6 +24,11 @@ impl AExpr {
 
             Literal(v) => v.is_scalar(),
 
+            Eval { variant, .. } => match variant {
+                EvalVariant::List => true,
+                EvalVariant::Cumulative { min_samples: _ } => false,
+            },
+
             Alias(_, _) | BinaryExpr { .. } | Column(_) | Ternary { .. } | Cast { .. } => true,
 
             Agg { .. }
@@ -228,7 +233,7 @@ impl ExprPushdownGroup {
                         ..
                     } => true,
 
-                    #[cfg(feature = "temporal")]
+                    #[cfg(all(feature = "strings", feature = "temporal"))]
                     AExpr::Function {
                         input,
                         function:

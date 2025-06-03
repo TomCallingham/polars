@@ -58,7 +58,7 @@ impl NodeTraverser {
     // Increment major on breaking changes to the IR (e.g. renaming
     // fields, reordering tuples), minor on backwards compatible
     // changes (e.g. exposing a new expression node).
-    const VERSION: Version = (7, 0);
+    const VERSION: Version = (8, 0);
 
     pub fn new(root: Node, lp_arena: Arena<IR>, expr_arena: Arena<AExpr>) -> Self {
         Self {
@@ -191,12 +191,14 @@ impl NodeTraverser {
     /// Add some expressions to the arena and return their new node ids as well
     /// as the total number of nodes in the arena.
     fn add_expressions(&mut self, expressions: Vec<PyExpr>) -> PyResult<(Vec<usize>, usize)> {
+        let lp_arena = self.lp_arena.lock().unwrap();
+        let schema = lp_arena.get(self.root).schema(&lp_arena);
         let mut expr_arena = self.expr_arena.lock().unwrap();
         Ok((
             expressions
                 .into_iter()
                 .map(|e| {
-                    to_aexpr(e.inner, &mut expr_arena)
+                    to_aexpr(e.inner, &mut expr_arena, &schema)
                         .map_err(PyPolarsErr::from)
                         .map(|v| v.0)
                 })

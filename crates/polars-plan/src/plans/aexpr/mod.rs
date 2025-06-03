@@ -70,6 +70,7 @@ impl Hash for IRAggExpr {
                 method: interpol, ..
             } => interpol.hash(state),
             Self::Std(_, v) | Self::Var(_, v) => v.hash(state),
+            Self::Count(_, include_nulls) => include_nulls.hash(state),
             _ => {},
         }
     }
@@ -188,6 +189,18 @@ pub enum AExpr {
         function: OpaqueColumnUdf,
         output_type: GetOutput,
         options: FunctionOptions,
+    },
+    /// Evaluates the `evaluation` expression on the output of the `expr`.
+    ///
+    /// Consequently, `expr` is an input and `evaluation` is not and needs a different schema.
+    Eval {
+        expr: Node,
+
+        /// An expression that is guaranteed to not contain any column reference beyond
+        /// `pl.element()` which refers to `pl.col("")`.
+        evaluation: Node,
+
+        variant: EvalVariant,
     },
     Function {
         /// Function arguments

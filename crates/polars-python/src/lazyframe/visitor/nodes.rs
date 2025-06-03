@@ -1,5 +1,6 @@
 #[cfg(feature = "iejoin")]
 use polars::prelude::JoinTypeOptionsIR;
+use polars::prelude::deletion::DeletionFilesList;
 use polars::prelude::python_dsl::PythonScanSource;
 use polars_core::prelude::IdxSize;
 use polars_io::cloud::CloudOptions;
@@ -9,7 +10,7 @@ use polars_plan::prelude::{FileScan, FunctionIR, PythonPredicate, UnifiedScanArg
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyString};
 
 use super::expr_nodes::PyGroupbyOptions;
 use crate::PyDataFrame;
@@ -126,6 +127,29 @@ impl PyFileOptions {
     #[getter]
     fn include_file_paths(&self, _py: Python<'_>) -> Option<&str> {
         self.inner.include_file_paths.as_deref()
+    }
+
+    /// One of:
+    /// * None
+    /// * ("iceberg-position-delete", dict[int, list[str]])
+    #[getter]
+    fn deletion_files(&self, py: Python<'_>) -> PyResult<PyObject> {
+        Ok(match &self.inner.deletion_files {
+            None => py.None().into_any(),
+
+            Some(DeletionFilesList::IcebergPositionDelete(paths)) => {
+                let out = PyDict::new(py);
+
+                for (k, v) in paths.iter() {
+                    out.set_item(*k, v.as_ref())?;
+                }
+
+                ("iceberg-position-delete", out)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind()
+            },
+        })
     }
 }
 
@@ -440,7 +464,7 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
             cache_hits,
         } => Cache {
             input: input.0,
-            id_: *id,
+            id_: id.to_usize(),
             cache_hits: *cache_hits,
         }
         .into_py_any(py),
@@ -458,8 +482,7 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
             aggs: aggs.iter().map(|e| e.into()).collect(),
             apply: apply.as_ref().map_or(Ok(()), |_| {
                 Err(PyNotImplementedError::new_err(format!(
-                    "apply inside GroupBy {:?}",
-                    plan
+                    "apply inside GroupBy {plan:?}"
                 )))
             })?,
             maintain_order: *maintain_order,
@@ -575,18 +598,6 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
                 )
                     .into_py_any(py)?,
                 FunctionIR::Rechunk => ("rechunk",).into_py_any(py)?,
-                FunctionIR::Rename {
-                    existing,
-                    new,
-                    swapping,
-                    schema: _,
-                } => (
-                    "rename",
-                    existing.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    new.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                    *swapping,
-                )
-                    .into_py_any(py)?,
                 FunctionIR::Explode { columns, schema: _ } => (
                     "explode",
                     columns.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
