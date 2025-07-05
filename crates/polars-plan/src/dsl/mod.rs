@@ -70,6 +70,8 @@ use polars_core::series::IsSorted;
 #[cfg(feature = "diff")]
 use polars_core::series::ops::NullBehavior;
 use polars_core::utils::try_get_supertype;
+#[cfg(feature = "is_close")]
+use polars_utils::total_ord::TotalOrdWrap;
 pub use selector::Selector;
 #[cfg(feature = "dtype-struct")]
 pub use struct_::*;
@@ -958,6 +960,26 @@ impl Expr {
         self.map_unary(BooleanFunction::IsUnique)
     }
 
+    /// Check whether floating point values are close to each other.
+    #[allow(clippy::wrong_self_convention)]
+    #[cfg(feature = "is_close")]
+    pub fn is_close<E: Into<Expr>>(
+        self,
+        expr: E,
+        abs_tol: f64,
+        rel_tol: f64,
+        nans_equal: bool,
+    ) -> Self {
+        self.map_binary(
+            BooleanFunction::IsClose {
+                abs_tol: TotalOrdWrap(abs_tol),
+                rel_tol: TotalOrdWrap(rel_tol),
+                nans_equal,
+            },
+            expr.into(),
+        )
+    }
+
     /// Get the approximate count of unique values.
     #[cfg(feature = "approx_unique")]
     pub fn approx_n_unique(self) -> Self {
@@ -1121,10 +1143,13 @@ impl Expr {
         self,
         by: Expr,
         options: RollingOptionsDynamicWindow,
-        rolling_function_by: fn(RollingOptionsDynamicWindow) -> RollingFunctionBy,
+        rolling_function_by: RollingFunctionBy,
     ) -> Expr {
         self.map_binary(
-            FunctionExpr::RollingExprBy(rolling_function_by(options)),
+            FunctionExpr::RollingExprBy {
+                function_by: rolling_function_by,
+                options,
+            },
             by,
         )
     }
@@ -1142,9 +1167,12 @@ impl Expr {
     fn finish_rolling(
         self,
         options: RollingOptionsFixedWindow,
-        rolling_function: fn(RollingOptionsFixedWindow) -> RollingFunction,
+        rolling_function: RollingFunction,
     ) -> Expr {
-        self.map_unary(FunctionExpr::RollingExpr(rolling_function(options)))
+        self.map_unary(FunctionExpr::RollingExpr {
+            function: rolling_function,
+            options,
+        })
     }
 
     /// Apply a rolling minimum based on another column.

@@ -1,5 +1,5 @@
+use super::functions::convert_functions;
 use super::*;
-use crate::plans::conversion::functions::convert_functions;
 
 pub fn to_expr_ir(expr: Expr, arena: &mut Arena<AExpr>, schema: &Schema) -> PolarsResult<ExprIR> {
     let (node, output_name) = to_aexpr_impl(expr, arena, schema)?;
@@ -350,24 +350,12 @@ pub(super) fn to_aexpr_impl(
             match variant {
                 EvalVariant::List => {
                     for (_, e) in ArenaExprIter::iter(&&*arena, evaluation) {
-                        match e {
-                            #[cfg(feature = "dtype-categorical")]
-                            AExpr::Cast {
-                                dtype: DataType::Categorical(_, _) | DataType::Enum(_, _),
-                                ..
-                            } => {
-                                polars_bail!(
-                                    ComputeError: "casting to categorical not allowed in `list.eval`"
-                                )
-                            },
-                            AExpr::Column(name) => {
-                                polars_ensure!(
-                                    name.is_empty(),
-                                    ComputeError:
-                                    "named columns are not allowed in `list.eval`; consider using `element` or `col(\"\")`"
-                                );
-                            },
-                            _ => {},
+                        if let AExpr::Column(name) = e {
+                            polars_ensure!(
+                                name.is_empty(),
+                                ComputeError:
+                                "named columns are not allowed in `list.eval`; consider using `element` or `col(\"\")`"
+                            );
                         }
                     }
                 },

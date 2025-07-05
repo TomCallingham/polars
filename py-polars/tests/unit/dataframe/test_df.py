@@ -680,6 +680,7 @@ def test_hstack_dataframe(in_place: bool) -> None:
         assert_frame_equal(df_out, expected)
 
 
+@pytest.mark.may_fail_cloud
 def test_file_buffer() -> None:
     f = BytesIO()
     f.write(b"1,2,3,4,5,6\n7,8,9,10,11,12")
@@ -702,14 +703,6 @@ def test_shift() -> None:
         {"A": [None, "a", "b"], "B": [None, 1, 3]},
     )
     assert_frame_equal(a, b)
-
-
-def test_custom_group_by() -> None:
-    df = pl.DataFrame({"a": [1, 2, 1, 1], "b": ["a", "b", "c", "c"]})
-    out = df.group_by("b", maintain_order=True).agg(
-        [pl.col("a").map_elements(lambda x: x.sum(), return_dtype=pl.Int64)]
-    )
-    assert out.rows() == [("a", 1), ("b", 2), ("c", 2)]
 
 
 def test_multiple_columns_drop() -> None:
@@ -794,6 +787,38 @@ def test_to_dummies_drop_first() -> None:
     ]
 
 
+def test_to_dummies_drop_nulls() -> None:
+    df = pl.DataFrame(
+        {
+            "foo": [0, 1, None],
+            "bar": [3, None, 5],
+            "baz": [None, "y", "z"],
+        }
+    )
+
+    dm = df.to_dummies(drop_nulls=True)
+
+    expected = pl.DataFrame(
+        {
+            "foo_0": [1, 0, 0],
+            "foo_1": [0, 1, 0],
+            "bar_3": [1, 0, 0],
+            "bar_5": [0, 0, 1],
+            "baz_y": [0, 1, 0],
+            "baz_z": [0, 0, 1],
+        },
+        schema={
+            "foo_0": pl.UInt8,
+            "foo_1": pl.UInt8,
+            "bar_3": pl.UInt8,
+            "bar_5": pl.UInt8,
+            "baz_y": pl.UInt8,
+            "baz_z": pl.UInt8,
+        },
+    )
+    assert_frame_equal(dm, expected)
+
+
 def test_to_pandas(df: pl.DataFrame) -> None:
     # pyarrow cannot deal with unsigned dictionary integer yet.
     # pyarrow cannot convert a time64 w/ non-zero nanoseconds
@@ -851,6 +876,7 @@ def test_df_fold() -> None:
     assert_series_equal(df_width_one.fold(lambda s1, s2: s1), df["a"])
 
 
+@pytest.mark.may_fail_cloud  # TODO: make pickleable
 def test_fold_filter() -> None:
     df = pl.DataFrame({"a": [1, 2, 3], "b": [0, 1, 2]})
 
@@ -1775,6 +1801,7 @@ def test_hash_collision_multiple_columns_equal_values_15390(e: pl.Expr) -> None:
 
 
 @pytest.mark.may_fail_auto_streaming  # Python objects not yet supported in row encoding
+@pytest.mark.may_fail_cloud
 def test_hashing_on_python_objects() -> None:
     # see if we can do a group_by, drop_duplicates on a DataFrame with objects.
     # this requires that the hashing and aggregations are done on python objects
@@ -1973,6 +2000,7 @@ def test_with_row_count_deprecated() -> None:
     assert out["row_nr"].to_list() == [0, 1, 2]
 
 
+@pytest.mark.may_fail_cloud
 def test_filter_with_all_expansion() -> None:
     df = pl.DataFrame(
         {
@@ -1987,6 +2015,7 @@ def test_filter_with_all_expansion() -> None:
 
 # TODO: investigate this discrepancy in auto streaming
 @pytest.mark.may_fail_auto_streaming
+@pytest.mark.may_fail_cloud
 def test_extension() -> None:
     class Foo:
         def __init__(self, value: Any) -> None:
@@ -2222,6 +2251,7 @@ def test_df_broadcast() -> None:
     assert out.rows() == [(1, [1, 2]), (2, [1, 2]), (3, [1, 2])]
 
 
+@pytest.mark.may_fail_cloud  # not a lazyframe method
 def test_product() -> None:
     df = pl.DataFrame(
         {
@@ -2610,6 +2640,7 @@ def test_selection_regex_and_multicol() -> None:
 
 @pytest.mark.parametrize("subset", ["a", cs.starts_with("x", "a")])
 @pytest.mark.may_fail_auto_streaming  # Flaky in CI, see https://github.com/pola-rs/polars/issues/20943
+@pytest.mark.may_fail_cloud
 def test_unique_on_sorted(subset: Any) -> None:
     df = pl.DataFrame(data={"a": [1, 1, 3], "b": [1, 2, 3]})
 
@@ -2857,6 +2888,7 @@ def test_init_datetimes_with_timezone() -> None:
         ),
     ],
 )
+@pytest.mark.may_fail_cloud
 def test_init_vs_strptime_consistency(
     tzinfo: timezone | None,
     offset: str,
@@ -2963,8 +2995,8 @@ def test_unique(
 ) -> None:
     df = pl.DataFrame({"a": [1, 2, 2, 2], "b": [3, 4, 4, 4], "c": [5, 6, 7, 7]})
 
-    result = df.unique(maintain_order=True, subset=subset, keep=keep)
-    expected = df.filter(expected_mask)
+    result = df.unique(maintain_order=True, subset=subset, keep=keep).sort(pl.all())
+    expected = df.filter(expected_mask).sort(pl.all())
     assert_frame_equal(result, expected)
 
 

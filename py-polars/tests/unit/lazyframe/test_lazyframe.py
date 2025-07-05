@@ -247,9 +247,11 @@ def test_apply_custom_function() -> None:
         .agg(
             [
                 pl.col("cars")
+                .implode()
                 .map_elements(lambda groups: groups.len(), return_dtype=pl.Int64)
                 .alias("custom_1"),
                 pl.col("cars")
+                .implode()
                 .map_elements(lambda groups: groups.len(), return_dtype=pl.Int64)
                 .alias("custom_2"),
                 pl.count("cars").alias("cars_count"),
@@ -360,6 +362,7 @@ def test_fetch(fruits_cars: pl.DataFrame) -> None:
     assert_frame_equal(res, res[:2])
 
 
+@pytest.mark.may_fail_cloud  # TODO: make pickleable
 def test_fold_filter() -> None:
     lf = pl.LazyFrame({"a": [1, 2, 3], "b": [0, 1, 2]})
 
@@ -583,7 +586,13 @@ def test_custom_group_by() -> None:
     ldf = pl.LazyFrame({"a": [1, 2, 1, 1], "b": ["a", "b", "c", "c"]})
     out = (
         ldf.group_by("b", maintain_order=True)
-        .agg([pl.col("a").map_elements(lambda x: x.sum(), return_dtype=pl.Int64)])
+        .agg(
+            [
+                pl.col("a")
+                .implode()
+                .map_elements(lambda x: x.sum(), return_dtype=pl.Int64)
+            ]
+        )
         .collect()
     )
     assert out.rows() == [("a", 1), ("b", 2), ("c", 2)]

@@ -200,6 +200,7 @@ pub enum PyBooleanFunction {
     IsDuplicated,
     IsBetween,
     IsIn,
+    IsClose,
     AllHorizontal,
     AnyHorizontal,
     Not,
@@ -803,7 +804,7 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<PyObject> {
                     IRStringFunction::Find { literal, strict } => {
                         (PyStringFunction::Find, literal, strict).into_py_any(py)
                     },
-                    IRStringFunction::ToInteger(strict) => {
+                    IRStringFunction::ToInteger { dtype: _, strict } => {
                         (PyStringFunction::ToInteger, strict).into_py_any(py)
                     },
                     IRStringFunction::LenBytes => (PyStringFunction::LenBytes,).into_py_any(py),
@@ -1081,6 +1082,12 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<PyObject> {
                     IRBooleanFunction::IsIn { nulls_equal } => {
                         (PyBooleanFunction::IsIn, nulls_equal).into_py_any(py)
                     },
+                    IRBooleanFunction::IsClose {
+                        abs_tol,
+                        rel_tol,
+                        nans_equal,
+                    } => (PyBooleanFunction::IsClose, abs_tol.0, rel_tol.0, nans_equal)
+                        .into_py_any(py),
                     IRBooleanFunction::AllHorizontal => {
                         (PyBooleanFunction::AllHorizontal,).into_py_any(py)
                     },
@@ -1148,29 +1155,29 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<PyObject> {
                 #[cfg(feature = "sign")]
                 IRFunctionExpr::Sign => ("sign",).into_py_any(py),
                 IRFunctionExpr::FillNull => ("fill_null",).into_py_any(py),
-                IRFunctionExpr::RollingExpr(rolling) => {
-                    return Err(PyNotImplementedError::new_err(format!("{rolling}")));
+                IRFunctionExpr::RollingExpr { function, .. } => {
+                    return Err(PyNotImplementedError::new_err(format!("{function}")));
                 },
-                IRFunctionExpr::RollingExprBy(rolling) => match rolling {
-                    IRRollingFunctionBy::MinBy(_) => {
+                IRFunctionExpr::RollingExprBy { function_by, .. } => match function_by {
+                    IRRollingFunctionBy::MinBy => {
                         return Err(PyNotImplementedError::new_err("rolling min by"));
                     },
-                    IRRollingFunctionBy::MaxBy(_) => {
+                    IRRollingFunctionBy::MaxBy => {
                         return Err(PyNotImplementedError::new_err("rolling max by"));
                     },
-                    IRRollingFunctionBy::MeanBy(_) => {
+                    IRRollingFunctionBy::MeanBy => {
                         return Err(PyNotImplementedError::new_err("rolling mean by"));
                     },
-                    IRRollingFunctionBy::SumBy(_) => {
+                    IRRollingFunctionBy::SumBy => {
                         return Err(PyNotImplementedError::new_err("rolling sum by"));
                     },
-                    IRRollingFunctionBy::QuantileBy(_) => {
+                    IRRollingFunctionBy::QuantileBy => {
                         return Err(PyNotImplementedError::new_err("rolling quantile by"));
                     },
-                    IRRollingFunctionBy::VarBy(_) => {
+                    IRRollingFunctionBy::VarBy => {
                         return Err(PyNotImplementedError::new_err("rolling var by"));
                     },
-                    IRRollingFunctionBy::StdBy(_) => {
+                    IRRollingFunctionBy::StdBy => {
                         return Err(PyNotImplementedError::new_err("rolling std by"));
                     },
                 },
