@@ -485,3 +485,6 @@ def __getattr__(name: str) -> Any:
 
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
+
+
+Config.set_engine_affinity("streaming")  # TC preference

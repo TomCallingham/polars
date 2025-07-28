@@ -4512,6 +4512,7 @@ class Series:
     def v(self) -> np.ndarray[Any, Any]:
         """Shorthand for to numpy."""
         return self.to_numpy()
+
     def is_close(
         self,
         other: IntoExpr,
@@ -4569,7 +4570,6 @@ class Series:
                 other, abs_tol=abs_tol, rel_tol=rel_tol, nans_equal=nans_equal
             )
         ).to_series()
->>>>>>> main
 
     def to_numpy(
         self,
