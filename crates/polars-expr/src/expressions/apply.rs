@@ -374,7 +374,7 @@ impl PhysicalExpr for ApplyExpr {
     }
 
     fn to_field(&self, input_schema: &Schema) -> PolarsResult<Field> {
-        self.expr.to_field(input_schema, Context::Default)
+        self.expr.to_field(input_schema)
     }
     fn as_partitioned_aggregator(&self) -> Option<&dyn PartitionedAggregation> {
         if self.inputs.len() == 1 && self.flags.is_elementwise() {
@@ -422,7 +422,7 @@ fn apply_multiple_elementwise<'a>(
             Ok(ac)
         },
         first_as => {
-            let check_lengths = check_lengths && !matches!(first_as, AggState::Literal(_));
+            let check_lengths = check_lengths && !matches!(first_as, AggState::LiteralScalar(_));
             let aggregated = acs.iter().all(|ac| ac.is_aggregated() | ac.is_literal())
                 && acs.iter().any(|ac| ac.is_aggregated());
             let mut c = acs

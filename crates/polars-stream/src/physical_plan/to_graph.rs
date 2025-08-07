@@ -31,9 +31,9 @@ use crate::morsel::{MorselSeq, get_ideal_morsel_size};
 use crate::nodes;
 use crate::nodes::io_sinks::SinkComputeNode;
 use crate::nodes::io_sinks::partition::PerPartitionSortBy;
-use crate::nodes::io_sources::multi_file_reader::MultiFileReaderConfig;
-use crate::nodes::io_sources::multi_file_reader::reader_interface::builder::FileReaderBuilder;
-use crate::nodes::io_sources::multi_file_reader::reader_interface::capabilities::ReaderCapabilities;
+use crate::nodes::io_sources::multi_scan::config::MultiScanConfig;
+use crate::nodes::io_sources::multi_scan::reader_interface::builder::FileReaderBuilder;
+use crate::nodes::io_sources::multi_scan::reader_interface::capabilities::ReaderCapabilities;
 use crate::physical_plan::lower_expr::compute_output_schema;
 use crate::utils::late_materialized_df::LateMaterializedDataFrame;
 
@@ -487,6 +487,28 @@ fn to_graph_rec<'a>(
             )
         },
 
+        Repeat { value, repeats } => {
+            let value_key = to_graph_rec(value.node, ctx)?;
+            let repeats_key = to_graph_rec(repeats.node, ctx)?;
+            let value_schema = ctx.phys_sm[value.node].output_schema.clone();
+            let repeats_schema = ctx.phys_sm[repeats.node].output_schema.clone();
+            ctx.graph.add_node(
+                nodes::repeat::RepeatNode::new(value_schema, repeats_schema),
+                [(value_key, value.port), (repeats_key, repeats.port)],
+            )
+        },
+
+        RleId { input, name } => {
+            let input_key = to_graph_rec(input.node, ctx)?;
+            let input_schema = &ctx.phys_sm[input.node].output_schema;
+            assert_eq!(input_schema.len(), 1);
+            let dtype = input_schema.get_at_index(0).unwrap().1.clone();
+            ctx.graph.add_node(
+                nodes::rle_id::RleIdNode::new(name.clone(), dtype),
+                [(input_key, input.port)],
+            )
+        },
+
         OrderedUnion { inputs } => {
             let input_keys = inputs
                 .iter()
@@ -578,29 +600,27 @@ fn to_graph_rec<'a>(
             let verbose = config::verbose();
 
             ctx.graph.add_node(
-                nodes::io_sources::multi_file_reader::MultiFileReader::new(Arc::new(
-                    MultiFileReaderConfig {
-                        sources,
-                        file_reader_builder,
-                        cloud_options,
-                        final_output_schema,
-                        file_projection_builder,
-                        row_index,
-                        pre_slice,
-                        predicate,
-                        hive_parts,
-                        include_file_paths,
-                        missing_columns_policy,
-                        forbid_extra_columns,
-                        cast_columns_policy,
-                        deletion_files,
-                        // Initialized later
-                        num_pipelines: RelaxedCell::new_usize(0),
-                        n_readers_pre_init: RelaxedCell::new_usize(0),
-                        max_concurrent_scans: RelaxedCell::new_usize(0),
-                        verbose,
-                    },
-                )),
+                nodes::io_sources::multi_scan::MultiScan::new(Arc::new(MultiScanConfig {
+                    sources,
+                    file_reader_builder,
+                    cloud_options,
+                    final_output_schema,
+                    file_projection_builder,
+                    row_index,
+                    pre_slice,
+                    predicate,
+                    hive_parts,
+                    include_file_paths,
+                    missing_columns_policy,
+                    forbid_extra_columns,
+                    cast_columns_policy,
+                    deletion_files,
+                    // Initialized later
+                    num_pipelines: RelaxedCell::new_usize(0),
+                    n_readers_pre_init: RelaxedCell::new_usize(0),
+                    max_concurrent_scans: RelaxedCell::new_usize(0),
+                    verbose,
+                })),
                 [],
             )
         },
@@ -994,31 +1014,30 @@ fn to_graph_rec<'a>(
 
             use crate::nodes::io_sources::batch::builder::BatchFnReaderBuilder;
             use crate::nodes::io_sources::batch::{BatchFnReader, GetBatchState};
-            use crate::nodes::io_sources::multi_file_reader::initialization::projection::ProjectionBuilder;
+            use crate::nodes::io_sources::multi_scan::components::projection::builder::ProjectionBuilder;
 
-            let mut reader = BatchFnReader {
+            let reader = BatchFnReader {
                 name: name.clone(),
                 // If validate_schema is false, the schema of the morsels may not match the
                 // configured schema. In this case we set this to `None` and the reader will
                 // retrieve the schema from the first morsel.
                 output_schema: validate_schema.then(|| output_schema.clone()),
                 get_batch_state: Some(GetBatchState::from(get_batch_fn)),
+                execution_state: None,
                 verbose: config::verbose(),
             };
-
-            // Note: This will potentially override the output schema if `validate_schema` is `false`.
-            let output_schema = reader._file_schema()?;
 
             let file_reader_builder = Arc::new(BatchFnReaderBuilder {
                 name,
                 reader: std::sync::Mutex::new(Some(reader)),
+                execution_state: Default::default(),
             }) as Arc<dyn FileReaderBuilder>;
 
             // Give multiscan a single scan source. (It doesn't actually read from this).
             let sources = ScanSources::Paths(Arc::from([PlPath::from_str("python-scan-0")]));
             let cloud_options = None;
             let final_output_schema = output_schema.clone();
-            let file_projection_builder = ProjectionBuilder::new(output_schema.clone(), None);
+            let file_projection_builder = ProjectionBuilder::new(output_schema, None, None);
             let row_index = None;
             let pre_slice = None;
             let predicate = None;
@@ -1031,29 +1050,27 @@ fn to_graph_rec<'a>(
             let verbose = config::verbose();
 
             ctx.graph.add_node(
-                nodes::io_sources::multi_file_reader::MultiFileReader::new(Arc::new(
-                    MultiFileReaderConfig {
-                        sources,
-                        file_reader_builder,
-                        cloud_options,
-                        final_output_schema,
-                        file_projection_builder,
-                        row_index,
-                        pre_slice,
-                        predicate,
-                        hive_parts,
-                        include_file_paths,
-                        missing_columns_policy,
-                        forbid_extra_columns,
-                        cast_columns_policy,
-                        deletion_files,
-                        // Initialized later
-                        num_pipelines: RelaxedCell::new_usize(0),
-                        n_readers_pre_init: RelaxedCell::new_usize(0),
-                        max_concurrent_scans: RelaxedCell::new_usize(0),
-                        verbose,
-                    },
-                )),
+                nodes::io_sources::multi_scan::MultiScan::new(Arc::new(MultiScanConfig {
+                    sources,
+                    file_reader_builder,
+                    cloud_options,
+                    final_output_schema,
+                    file_projection_builder,
+                    row_index,
+                    pre_slice,
+                    predicate,
+                    hive_parts,
+                    include_file_paths,
+                    missing_columns_policy,
+                    forbid_extra_columns,
+                    cast_columns_policy,
+                    deletion_files,
+                    // Initialized later
+                    num_pipelines: RelaxedCell::new_usize(0),
+                    n_readers_pre_init: RelaxedCell::new_usize(0),
+                    max_concurrent_scans: RelaxedCell::new_usize(0),
+                    verbose,
+                })),
                 [],
             )
         },

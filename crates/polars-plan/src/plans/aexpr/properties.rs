@@ -212,25 +212,28 @@ impl ExprPushdownGroup {
                     } => {
                         debug_assert!(input.len() <= 2);
 
-                        strptime_options.strict
-                            || input
-                                .get(1)
-                                .map(|x| expr_arena.get(x.node()))
-                                .is_some_and(|ae| match ae {
-                                    AExpr::Literal(lv) => {
-                                        lv.extract_str().is_some_and(|ambiguous| match ambiguous {
-                                            "raise" => true,
-                                            "earliest" | "latest" | "null" => false,
-                                            v => {
-                                                if cfg!(debug_assertions) {
-                                                    panic!("unhandled parameter to ambiguous: {v}")
-                                                }
-                                                true
-                                            },
-                                        })
-                                    },
-                                    _ => true,
-                                })
+                        let ambiguous_arg_is_infallible_scalar = input
+                            .get(1)
+                            .map(|x| expr_arena.get(x.node()))
+                            .is_some_and(|ae| match ae {
+                                AExpr::Literal(lv) => {
+                                    lv.extract_str().is_some_and(|ambiguous| match ambiguous {
+                                        "earliest" | "latest" | "null" => true,
+                                        "raise" => false,
+                                        v => {
+                                            if cfg!(debug_assertions) {
+                                                panic!("unhandled parameter to ambiguous: {v}")
+                                            }
+                                            false
+                                        },
+                                    })
+                                },
+                                _ => false,
+                            });
+
+                        let ambiguous_is_fallible = !ambiguous_arg_is_infallible_scalar;
+
+                        strptime_options.strict || ambiguous_is_fallible
                     },
                     AExpr::Cast {
                         expr,
@@ -327,7 +330,7 @@ pub fn can_pre_agg(agg: Node, expr_arena: &Arena<AExpr>, _input_schema: &Schema)
                         matches!(
                             expr_arena
                                 .get(agg)
-                                .get_type(_input_schema, Context::Default, expr_arena)
+                                .get_dtype(_input_schema, expr_arena)
                                 .map(|dt| { dt.is_primitive_numeric() }),
                             Ok(true)
                         )

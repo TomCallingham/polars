@@ -33,9 +33,9 @@ use slotmap::{SecondaryMap, SlotMap};
 pub use to_graph::physical_plan_to_graph;
 
 pub use self::lower_ir::StreamingLowerIRContext;
-use crate::nodes::io_sources::multi_file_reader::extra_ops::ForbidExtraColumns;
-use crate::nodes::io_sources::multi_file_reader::initialization::projection::ProjectionBuilder;
-use crate::nodes::io_sources::multi_file_reader::reader_interface::builder::FileReaderBuilder;
+use crate::nodes::io_sources::multi_scan::components::forbid_extra_columns::ForbidExtraColumns;
+use crate::nodes::io_sources::multi_scan::components::projection::builder::ProjectionBuilder;
+use crate::nodes::io_sources::multi_scan::reader_interface::builder::FileReaderBuilder;
 use crate::physical_plan::lower_expr::ExprCache;
 
 slotmap::new_key_type! {
@@ -193,6 +193,16 @@ pub enum PhysNodeKind {
         sort_options: SortMultipleOptions,
     },
 
+    Repeat {
+        value: PhysStream,
+        repeats: PhysStream,
+    },
+
+    RleId {
+        input: PhysStream,
+        name: PlSmallStr,
+    },
+
     OrderedUnion {
         inputs: Vec<PhysStream>,
     },
@@ -330,6 +340,7 @@ fn visit_node_inputs_mut(
             | PhysNodeKind::Map { input, .. }
             | PhysNodeKind::Sort { input, .. }
             | PhysNodeKind::Multiplexer { input }
+            | PhysNodeKind::RleId { input, .. }
             | PhysNodeKind::GroupBy { input, .. } => {
                 rec!(input.node);
                 visit(input);
@@ -384,6 +395,13 @@ fn visit_node_inputs_mut(
                 visit(input);
                 visit(offset);
                 visit(length);
+            },
+
+            PhysNodeKind::Repeat { value, repeats } => {
+                rec!(value.node);
+                rec!(repeats.node);
+                visit(value);
+                visit(repeats);
             },
 
             PhysNodeKind::OrderedUnion { inputs } | PhysNodeKind::Zip { inputs, .. } => {
