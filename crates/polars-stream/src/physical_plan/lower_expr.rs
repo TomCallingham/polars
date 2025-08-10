@@ -8,6 +8,7 @@ use polars_error::PolarsResult;
 use polars_expr::state::ExecutionState;
 use polars_expr::{ExpressionConversionState, create_physical_expr};
 use polars_ops::frame::{JoinArgs, JoinType};
+use polars_ops::series::{RLE_LENGTH_COLUMN_NAME, RLE_VALUE_COLUMN_NAME};
 use polars_plan::plans::AExpr;
 use polars_plan::plans::expr_ir::{ExprIR, OutputName};
 use polars_plan::prelude::*;
@@ -191,7 +192,6 @@ pub fn is_input_independent_rec(
         AExpr::AnonymousFunction {
             input,
             function: _,
-            output_type: _,
             options: _,
             fmt_str: _,
         }
@@ -320,7 +320,6 @@ pub fn is_length_preserving_rec(
         AExpr::AnonymousFunction {
             input,
             function: _,
-            output_type: _,
             options,
             fmt_str: _,
         }
@@ -937,18 +936,57 @@ fn lower_exprs_with_ctx(
 
             AExpr::Function {
                 input: ref inner_exprs,
+                function: IRFunctionExpr::RLE,
+                options: _,
+            } => {
+                assert_eq!(inner_exprs.len(), 1);
+
+                let input_schema = &ctx.phys_sm[input.node].output_schema;
+
+                let value_key = unique_column_name();
+                let value_dtype = inner_exprs[0].dtype(input_schema, ctx.expr_arena)?;
+
+                let input = build_select_stream_with_ctx(
+                    input,
+                    &[inner_exprs[0].with_alias(value_key.clone())],
+                    ctx,
+                )?;
+                let node_kind = PhysNodeKind::Rle(input);
+
+                let output_schema = Schema::from_iter([(
+                    value_key.clone(),
+                    DataType::Struct(vec![
+                        Field::new(
+                            PlSmallStr::from_static(RLE_VALUE_COLUMN_NAME),
+                            value_dtype.clone(),
+                        ),
+                        Field::new(PlSmallStr::from_static(RLE_LENGTH_COLUMN_NAME), IDX_DTYPE),
+                    ]),
+                )]);
+                let node_key = ctx
+                    .phys_sm
+                    .insert(PhysNode::new(Arc::new(output_schema), node_kind));
+                input_streams.insert(PhysStream::first(node_key));
+                transformed_exprs.push(ctx.expr_arena.add(AExpr::Column(value_key)));
+            },
+
+            AExpr::Function {
+                input: ref inner_exprs,
                 function: IRFunctionExpr::RLEID,
                 options: _,
             } => {
+                assert_eq!(inner_exprs.len(), 1);
+
                 let value_key = unique_column_name();
 
-                let input = build_select_stream_with_ctx(input, inner_exprs, ctx)?;
-                let node_kind = PhysNodeKind::RleId {
+                let input = build_select_stream_with_ctx(
                     input,
-                    name: value_key.clone(),
-                };
+                    &[inner_exprs[0].with_alias(value_key.clone())],
+                    ctx,
+                )?;
+                let node_kind = PhysNodeKind::RleId(input);
 
-                let output_schema = Schema::from_iter([(value_key.clone(), DataType::UInt32)]);
+                let output_schema = Schema::from_iter([(value_key.clone(), IDX_DTYPE)]);
                 let node_key = ctx
                     .phys_sm
                     .insert(PhysNode::new(Arc::new(output_schema), node_kind));
@@ -1103,6 +1141,7 @@ fn lower_exprs_with_ctx(
                 input_streams.insert(PhysStream::first(node_key));
                 transformed_exprs.push(col_expr);
             },
+
             AExpr::SortBy {
                 expr: inner,
                 by,
@@ -1135,17 +1174,67 @@ fn lower_exprs_with_ctx(
                 };
                 let output_schema = ctx.phys_sm[select_stream.node].output_schema.clone();
                 let sort_node_key = ctx.phys_sm.insert(PhysNode::new(output_schema, kind));
-                let sort_stream = PhysStream::first(sort_node_key);
 
-                // Drop the by columns.
                 let sorted_col_expr = ctx.expr_arena.add(AExpr::Column(sorted_name.clone()));
-                let sorted_col_ir =
-                    ExprIR::new(sorted_col_expr, OutputName::Alias(sorted_name.clone()));
-                let post_sort_select_stream =
-                    build_select_stream_with_ctx(sort_stream, &[sorted_col_ir], ctx)?;
-                input_streams.insert(post_sort_select_stream);
+                input_streams.insert(PhysStream::first(sort_node_key));
                 transformed_exprs.push(sorted_col_expr);
             },
+
+            #[cfg(feature = "top_k")]
+            AExpr::Function {
+                input: inner_exprs,
+                function: function @ (IRFunctionExpr::TopK { .. } | IRFunctionExpr::TopKBy { .. }),
+                options: _,
+            } => {
+                // Select our inputs.
+                let by = &inner_exprs[2..];
+                let out_name = unique_column_name();
+                let by_names = by.iter().map(|_| unique_column_name()).collect_vec();
+                let data_irs = [(&out_name, &inner_exprs[0])]
+                    .into_iter()
+                    .chain(by_names.iter().zip(by.iter()))
+                    .map(|(name, inner)| ExprIR::new(inner.node(), OutputName::Alias(name.clone())))
+                    .collect_vec();
+                let data_stream = build_select_stream_with_ctx(input, &data_irs, ctx)?;
+                let k_stream = build_select_stream_with_ctx(input, &inner_exprs[1..2], ctx)?;
+
+                // Create 'by' column expressions.
+                let out_col_node = ctx.expr_arena.add(AExpr::Column(out_name.clone()));
+                let out_col_expr = ExprIR::new(out_col_node, OutputName::Alias(out_name));
+                let (by_column, reverse) = match function {
+                    IRFunctionExpr::TopK { descending } => {
+                        (vec![out_col_expr.clone()], vec![descending])
+                    },
+                    IRFunctionExpr::TopKBy {
+                        descending: reverse,
+                    } => {
+                        let by_column = by_names
+                            .into_iter()
+                            .map(|name| {
+                                ExprIR::new(
+                                    ctx.expr_arena.add(AExpr::Column(name.clone())),
+                                    OutputName::Alias(name),
+                                )
+                            })
+                            .collect();
+                        (by_column, reverse.clone())
+                    },
+                    _ => unreachable!(),
+                };
+
+                let kind = PhysNodeKind::TopK {
+                    input: data_stream,
+                    k: k_stream,
+                    nulls_last: vec![true; by_column.len()],
+                    reverse,
+                    by_column,
+                };
+                let output_schema = ctx.phys_sm[data_stream.node].output_schema.clone();
+                let node_key = ctx.phys_sm.insert(PhysNode::new(output_schema, kind));
+                input_streams.insert(PhysStream::first(node_key));
+                transformed_exprs.push(out_col_node);
+            },
+
             AExpr::Filter { input: inner, by } => {
                 // Select our inputs (if we don't do this we'll waste time filtering irrelevant columns).
                 let out_name = unique_column_name();

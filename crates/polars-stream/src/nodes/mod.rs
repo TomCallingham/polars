@@ -16,10 +16,12 @@ pub mod negative_slice;
 pub mod ordered_union;
 pub mod reduce;
 pub mod repeat;
+pub mod rle;
 pub mod rle_id;
 pub mod select;
 pub mod simple_projection;
 pub mod streaming_slice;
+pub mod top_k;
 pub mod with_row_index;
 pub mod zip;
 

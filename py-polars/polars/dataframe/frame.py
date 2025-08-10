@@ -12393,7 +12393,10 @@ class DataFrame:
 
     def _row_encode(
         self,
-        fields: list[tuple[bool, bool, bool]],
+        *,
+        unordered: bool = False,
+        descending: list[bool] | None = None,
+        nulls_last: list[bool] | None = None,
     ) -> Series:
         """
         Row encode the given DataFrame.
@@ -12406,7 +12409,14 @@ class DataFrame:
         - nulls_last
         - no_order
         """
-        return pl.Series._from_pyseries(self._df._row_encode(fields))
+        return self.select_seq(
+            F._row_encode(
+                F.all(),
+                unordered=unordered,
+                descending=descending,
+                nulls_last=nulls_last,
+            )
+        ).to_series()
 
 
 def _prepare_other_arg(other: Any, length: int | None = None) -> Series:

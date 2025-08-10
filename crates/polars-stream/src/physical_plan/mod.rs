@@ -193,15 +193,22 @@ pub enum PhysNodeKind {
         sort_options: SortMultipleOptions,
     },
 
+    TopK {
+        input: PhysStream,
+        k: PhysStream,
+        by_column: Vec<ExprIR>,
+        reverse: Vec<bool>,
+        nulls_last: Vec<bool>,
+    },
+
     Repeat {
         value: PhysStream,
         repeats: PhysStream,
     },
 
-    RleId {
-        input: PhysStream,
-        name: PlSmallStr,
-    },
+    // Parameter is the input stream
+    Rle(PhysStream),
+    RleId(PhysStream),
 
     OrderedUnion {
         inputs: Vec<PhysStream>,
@@ -340,7 +347,8 @@ fn visit_node_inputs_mut(
             | PhysNodeKind::Map { input, .. }
             | PhysNodeKind::Sort { input, .. }
             | PhysNodeKind::Multiplexer { input }
-            | PhysNodeKind::RleId { input, .. }
+            | PhysNodeKind::Rle(input)
+            | PhysNodeKind::RleId(input)
             | PhysNodeKind::GroupBy { input, .. } => {
                 rec!(input.node);
                 visit(input);
@@ -382,6 +390,13 @@ fn visit_node_inputs_mut(
                 rec!(input_right.node);
                 visit(input_left);
                 visit(input_right);
+            },
+
+            PhysNodeKind::TopK { input, k, .. } => {
+                rec!(input.node);
+                rec!(k.node);
+                visit(input);
+                visit(k);
             },
 
             PhysNodeKind::DynamicSlice {
