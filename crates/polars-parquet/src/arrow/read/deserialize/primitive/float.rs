@@ -164,7 +164,7 @@ where
     fn evaluate_predicate(
         &mut self,
         state: &utils::State<'_, Self>,
-        _predicate: &SpecializedParquetColumnExpr,
+        _predicate: Option<&SpecializedParquetColumnExpr>,
         pred_true_mask: &mut BitmapBuilder,
         dict_mask: Option<&Bitmap>,
     ) -> ParquetResult<bool> {
@@ -211,6 +211,7 @@ where
         mut state: utils::State<'_, Self>,
         decoded: &mut Self::DecodedState,
         filter: Option<Filter>,
+        _chunks: &mut Vec<Self::Output>,
     ) -> ParquetResult<()> {
         match state.translation {
             StateTranslation::Plain(ref mut values) => super::plain::decode(

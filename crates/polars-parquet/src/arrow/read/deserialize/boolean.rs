@@ -330,7 +330,7 @@ impl Decoder for BooleanDecoder {
     fn evaluate_predicate(
         &mut self,
         _state: &utils::State<'_, Self>,
-        _predicate: &SpecializedParquetColumnExpr,
+        _predicate: Option<&SpecializedParquetColumnExpr>,
         _pred_true_mask: &mut BitmapBuilder,
         _dict_mask: Option<&Bitmap>,
     ) -> ParquetResult<bool> {
@@ -360,6 +360,7 @@ impl Decoder for BooleanDecoder {
         state: utils::State<'_, Self>,
         (target, validity): &mut Self::DecodedState,
         filter: Option<super::Filter>,
+        _chunks: &mut Vec<Self::Output>,
     ) -> ParquetResult<()> {
         match state.translation {
             StateTranslation::Plain(values) => {

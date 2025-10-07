@@ -15,8 +15,9 @@ pub mod cell;
 pub mod chunks;
 pub mod clmul;
 mod config;
+pub use config::check_allow_importing_interval_as_struct;
 pub mod cpuid;
-pub mod enum_unit_vec;
+pub mod decimal;
 pub mod error;
 pub mod floor_divmod;
 pub mod functions;
@@ -45,6 +46,7 @@ pub mod unique_id;
 pub mod with_drop;
 
 pub use functions::*;
+pub mod compression;
 pub mod file;
 
 pub mod aliases;
@@ -80,3 +82,4 @@ pub mod pl_serialize;
 
 pub mod kahan_sum;
 pub use either;
+pub use idx_vec::UnitVec;

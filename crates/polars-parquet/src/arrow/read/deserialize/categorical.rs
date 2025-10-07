@@ -79,7 +79,7 @@ impl<T: DictionaryKey + IndexMapping<Output = T::AlignedBytes>> utils::Decoder
     fn evaluate_predicate(
         &mut self,
         state: &utils::State<'_, Self>,
-        _predicate: &SpecializedParquetColumnExpr,
+        _predicate: Option<&SpecializedParquetColumnExpr>,
         pred_true_mask: &mut BitmapBuilder,
         dict_mask: Option<&Bitmap>,
     ) -> ParquetResult<bool> {
@@ -156,6 +156,7 @@ impl<T: DictionaryKey + IndexMapping<Output = T::AlignedBytes>> utils::Decoder
         state: utils::State<'_, Self>,
         decoded: &mut Self::DecodedState,
         filter: Option<super::Filter>,
+        _chunks: &mut Vec<Self::Output>,
     ) -> ParquetResult<()> {
         with_cast_mut_vec::<T, T::AlignedBytes, _, _>(&mut decoded.0, |aligned_bytes_vec| {
             super::dictionary_encoded::decode_dict_dispatch(
