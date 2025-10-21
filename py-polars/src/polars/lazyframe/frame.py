@@ -1307,6 +1307,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
             .. deprecated:: 1.30.0
                 Use the `optimizations` parameters.
+        streaming
+            Unused parameter, kept for backward compatibility.
+
+           ... deprecated:: 1.30.0
+                Use the `engine` parameter instead.
         engine
             Select the engine used to process the query, optional.
             At the moment, if set to `"auto"` (default), the query
@@ -1498,6 +1503,8 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             Select the stage to display. Currently only the streaming engine has a
             separate physical stage, for the other engines both IR and physical are the
             same.
+        optimizations
+            The set of the optimizations considered during query optimization.
 
 
         Examples
@@ -2678,10 +2685,8 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             - `True`: enable default set of statistics (default). Some
               statistics may be disabled.
             - `False`: disable all statistics
-            - "full": calculate and write all available statistics. Cannot be
-              combined with `use_pyarrow`.
-            - `{ "statistic-key": True / False, ... }`. Cannot be combined with
-              `use_pyarrow`. Available keys:
+            - "full": calculate and write all available statistics.
+            - `{ "statistic-key": True / False, ... }`. Available keys:
 
               - "min": column minimum value (default: `True`)
               - "max": column maximum value (default: `True`)
@@ -2789,6 +2794,23 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         --------
         >>> lf = pl.scan_csv("/path/to/my_larger_than_ram_file.csv")  # doctest: +SKIP
         >>> lf.sink_parquet("out.parquet")  # doctest: +SKIP
+
+        Sink to a `BytesIO` object.
+
+        >>> import io
+        >>> buf = io.BytesIO()  # doctest: +SKIP
+        >>> pl.LazyFrame({"x": [1, 2, 1]}).sink_parquet(buf)  # doctest: +SKIP
+
+        Split into a hive-partitioning style partition:
+
+        >>> pl.LazyFrame({"x": [1, 2, 1], "y": [3, 4, 5]}).sink_parquet(
+        ...     pl.PartitionByKey("./out/", by="x"),
+        ...     mkdir=True
+        ... )  # doctest: +SKIP
+
+        See Also
+        --------
+        PartitionByKey
         """
         engine = _select_engine(engine)
         if metadata is not None:
@@ -3046,6 +3068,23 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         --------
         >>> lf = pl.scan_csv("/path/to/my_larger_than_ram_file.csv")  # doctest: +SKIP
         >>> lf.sink_ipc("out.arrow")  # doctest: +SKIP
+
+        Sink to a `BytesIO` object.
+
+        >>> import io
+        >>> buf = io.BytesIO()  # doctest: +SKIP
+        >>> pl.LazyFrame({"x": [1, 2, 1]}).sink_ipc(buf)  # doctest: +SKIP
+
+        Split into a hive-partitioning style partition:
+
+        >>> pl.LazyFrame({"x": [1, 2, 1], "y": [3, 4, 5]}).sink_ipc(
+        ...     pl.PartitionByKey("./out/", by="x"),
+        ...     mkdir=True
+        ... )  # doctest: +SKIP
+
+        See Also
+        --------
+        PartitionByKey
         """
         engine = _select_engine(engine)
 
@@ -3335,6 +3374,23 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         --------
         >>> lf = pl.scan_csv("/path/to/my_larger_than_ram_file.csv")  # doctest: +SKIP
         >>> lf.sink_csv("out.csv")  # doctest: +SKIP
+
+        Sink to a `BytesIO` object.
+
+        >>> import io
+        >>> buf = io.BytesIO()  # doctest: +SKIP
+        >>> pl.LazyFrame({"x": [1, 2, 1]}).sink_csv(buf)  # doctest: +SKIP
+
+        Split into a hive-partitioning style partition:
+
+        >>> pl.LazyFrame({"x": [1, 2, 1], "y": [3, 4, 5]}).sink_csv(
+        ...     pl.PartitionByKey("./out/", by="x"),
+        ...     mkdir=True
+        ... )  # doctest: +SKIP
+
+        See Also
+        --------
+        PartitionByKey
         """
         from polars.io.csv._utils import _check_arg_is_1byte
 
@@ -3534,6 +3590,23 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         --------
         >>> lf = pl.scan_csv("/path/to/my_larger_than_ram_file.csv")  # doctest: +SKIP
         >>> lf.sink_ndjson("out.ndjson")  # doctest: +SKIP
+
+        Sink to a `BytesIO` object.
+
+        >>> import io
+        >>> buf = io.BytesIO()  # doctest: +SKIP
+        >>> pl.LazyFrame({"x": [1, 2, 1]}).sink_ndjson(buf)  # doctest: +SKIP
+
+        Split into a hive-partitioning style partition:
+
+        >>> pl.LazyFrame({"x": [1, 2, 1], "y": [3, 4, 5]}).sink_ndjson(
+        ...     pl.PartitionByKey("./out/", by="x"),
+        ...     mkdir=True
+        ... )  # doctest: +SKIP
+
+        See Also
+        --------
+        PartitionByKey
         """
         engine = _select_engine(engine)
 
@@ -6274,6 +6347,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             Validate that all column names exist in the current schema,
             and throw an exception if any do not. (Note that this parameter
             is a no-op when passing a function to `mapping`).
+
+        See Also
+        --------
+        Expr.name.replace
 
         Notes
         -----

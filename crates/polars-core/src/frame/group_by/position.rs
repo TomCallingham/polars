@@ -365,6 +365,16 @@ impl GroupsType {
         }
     }
 
+    pub fn is_overlapping(&self) -> bool {
+        matches!(
+            self,
+            GroupsType::Slice {
+                overlapping: true,
+                ..
+            }
+        )
+    }
+
     pub fn take_group_firsts(self) -> Vec<IdxSize> {
         match self {
             GroupsType::Idx(mut groups) => std::mem::take(&mut groups.first),
@@ -372,6 +382,18 @@ impl GroupsType {
                 groups.into_iter().map(|[first, _len]| first).collect()
             },
         }
+    }
+
+    /// Checks if groups are of equal length. The caller is responsible for
+    /// updating the groups by calling `groups()` prior to calling this method.
+    pub fn check_lengths(self: &GroupsType, other: &GroupsType) -> PolarsResult<()> {
+        if std::ptr::eq(self, other) {
+            return Ok(());
+        }
+        polars_ensure!(self.iter().zip(other.iter()).all(|(a, b)| {
+            a.len() == b.len()
+        }), ComputeError: "expressions must have matching group lengths");
+        Ok(())
     }
 
     /// # Safety
@@ -620,12 +642,6 @@ impl Clone for GroupPositions {
             offset: self.offset,
             len: self.len,
         }
-    }
-}
-
-impl PartialEq for GroupPositions {
-    fn eq(&self, other: &Self) -> bool {
-        self.offset == other.offset && self.len == other.len && self.sliced == other.sliced
     }
 }
 

@@ -48,6 +48,7 @@ pub enum IRAggExpr {
     NUnique(Node),
     First(Node),
     Last(Node),
+    Item(Node),
     Mean(Node),
     Implode(Node),
     Quantile {
@@ -146,6 +147,7 @@ impl From<IRAggExpr> for GroupByMethod {
             NUnique(_) => GroupByMethod::NUnique,
             First(_) => GroupByMethod::First,
             Last(_) => GroupByMethod::Last,
+            Item(_) => GroupByMethod::Item,
             Mean(_) => GroupByMethod::Mean,
             Implode(_) => GroupByMethod::Implode,
             Sum(_) => GroupByMethod::Sum,
@@ -165,6 +167,10 @@ impl From<IRAggExpr> for GroupByMethod {
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "ir_serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AExpr {
+    /// Values in a `eval` context.
+    ///
+    /// Equivalent of `pl.element()`.
+    Element,
     Explode {
         expr: Node,
         skip_empty: bool,
@@ -257,6 +263,7 @@ impl AExpr {
     #[recursive::recursive]
     pub fn is_scalar(&self, arena: &Arena<AExpr>) -> bool {
         match self {
+            AExpr::Element => false,
             AExpr::Literal(lv) => lv.is_scalar(),
             AExpr::Function { options, input, .. }
             | AExpr::AnonymousFunction { options, input, .. } => {
@@ -323,6 +330,7 @@ impl AExpr {
         }
 
         match self {
+            AExpr::Element => true,
             AExpr::Column(_) => true,
 
             AExpr::Literal(_) | AExpr::Agg(_) | AExpr::Len => false,
@@ -361,6 +369,66 @@ impl AExpr {
             AExpr::Window { function, .. } => is_length_preserving_ae(*function, arena),
 
             AExpr::Explode { .. } | AExpr::Filter { .. } | AExpr::Slice { .. } => false,
+        }
+    }
+
+    /// Is the top-level expression fallible based on the data values.
+    pub fn is_fallible_top_level(&self, arena: &Arena<AExpr>) -> bool {
+        #[allow(clippy::collapsible_match, clippy::match_like_matches_macro)]
+        match self {
+            AExpr::Function {
+                input, function, ..
+            } => match function {
+                IRFunctionExpr::ListExpr(f) => match f {
+                    IRListFunction::Get(false) => true,
+                    #[cfg(feature = "list_gather")]
+                    IRListFunction::Gather(false) => true,
+                    _ => false,
+                },
+                #[cfg(feature = "dtype-array")]
+                IRFunctionExpr::ArrayExpr(f) => match f {
+                    IRArrayFunction::Get(false) => true,
+                    _ => false,
+                },
+                #[cfg(all(feature = "strings", feature = "temporal"))]
+                IRFunctionExpr::StringExpr(f) => match f {
+                    IRStringFunction::Strptime(_, strptime_options) => {
+                        debug_assert!(input.len() <= 2);
+
+                        let ambiguous_arg_is_infallible_scalar = input
+                            .get(1)
+                            .map(|x| arena.get(x.node()))
+                            .is_some_and(|ae| match ae {
+                                AExpr::Literal(lv) => {
+                                    lv.extract_str().is_some_and(|ambiguous| match ambiguous {
+                                        "earliest" | "latest" | "null" => true,
+                                        "raise" => false,
+                                        v => {
+                                            if cfg!(debug_assertions) {
+                                                panic!("unhandled parameter to ambiguous: {v}")
+                                            }
+                                            false
+                                        },
+                                    })
+                                },
+                                _ => false,
+                            });
+
+                        let ambiguous_is_fallible = !ambiguous_arg_is_infallible_scalar;
+
+                        !matches!(arena.get(input[0].node()), AExpr::Literal(_))
+                            && (strptime_options.strict || ambiguous_is_fallible)
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            AExpr::Cast {
+                expr,
+                dtype: _,
+                options: CastOptions::Strict,
+            } => !matches!(arena.get(*expr), AExpr::Literal(_)),
+            _ => false,
         }
     }
 }

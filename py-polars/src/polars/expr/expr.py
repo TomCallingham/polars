@@ -130,13 +130,13 @@ class Expr:
     _pyexpr: PyExpr = None  # type: ignore[assignment]
     _accessors: ClassVar[set[str]] = {
         "arr",
+        "bin",
         "cat",
         "dt",
         "list",
         "meta",
         "name",
         "str",
-        "bin",
         "struct",
     }
 
@@ -484,7 +484,6 @@ class Expr:
         Parameters
         ----------
         ignore_nulls
-
             * If set to `True` (default), null values are ignored. If there
               are no non-null values, the output is `False`.
             * If set to `False`, `Kleene logic`_ is used to deal with nulls:
@@ -544,7 +543,6 @@ class Expr:
         Parameters
         ----------
         ignore_nulls
-
             * If set to `True` (default), null values are ignored. If there
               are no non-null values, the output is `True`.
             * If set to `False`, `Kleene logic`_ is used to deal with nulls:
@@ -3445,6 +3443,37 @@ class Expr:
         """
         return wrap_expr(self._pyexpr.last())
 
+    @unstable()
+    def item(self) -> Expr:
+        """
+        Get the single value.
+
+        This raises an error if there is not exactly one value.
+
+        See Also
+        --------
+        :meth:`Expr.get` : Get a single value by index.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"a": [1]})
+        >>> df.select(pl.col("a").item())
+        shape: (1, 1)
+        ┌─────┐
+        │ a   │
+        │ --- │
+        │ i64 │
+        ╞═════╡
+        │ 1   │
+        └─────┘
+        >>> df = pl.DataFrame({"a": [1, 2, 3]})
+        >>> df.select(pl.col("a").item())
+        Traceback (most recent call last):
+        ...
+        polars.exceptions.ComputeError: aggregation 'item' expected a single value, got 3 values
+        """  # noqa: W505
+        return wrap_expr(self._pyexpr.item())
+
     def over(
         self,
         partition_by: IntoExpr | Iterable[IntoExpr] | None = None,
@@ -3482,18 +3511,24 @@ class Expr:
             the nulls in last position.
         mapping_strategy: {'group_to_rows', 'join', 'explode'}
             - group_to_rows
-                If the aggregation results in multiple values, assign them back to their
-                position in the DataFrame. This can only be done if the group yields
-                the same elements before aggregation as after.
+                If the aggregation results in multiple values per group, map them back
+                to their row position in the DataFrame. This can only be done if each
+                group yields the same elements before aggregation as after. If the
+                aggregation results in one scalar value per group, this value will be
+                mapped to every row.
             - join
-                Join the groups as 'List<group_dtype>' to the row positions.
-                warning: this can be memory intensive.
+                If the aggregation may result in multiple values per group, join the
+                values as 'List<group_dtype>' to each row position. Warning: this can be
+                memory intensive. If the aggregation always results in one scalar value
+                per group, join this value as '<group_dtype>' to each row position.
             - explode
-                Explodes the grouped data into new rows, similar to the results of
-                `group_by` + `agg` + `explode`. Sorting of the given groups is required
-                if the groups are not part of the window operation for the operation,
-                otherwise the result would not make sense. This operation changes the
-                number of rows.
+                If the aggregation may result in multiple values per group, map each
+                value to a new row, similar to the results of `group_by` + `agg` +
+                `explode`. If the aggregation always results in one scalar value per
+                group, map this value to one row position. Sorting of the given groups
+                is required if the groups are not part of the window operation for the
+                operation, otherwise the result would not make sense. This operation
+                changes the number of rows.
 
         Examples
         --------
@@ -3551,6 +3586,41 @@ class Expr:
         │ b   ┆ 5   ┆ 2   ┆ 1     │
         │ b   ┆ 3   ┆ 1   ┆ 1     │
         └─────┴─────┴─────┴───────┘
+
+        Mapping strategy `join` joins the values by group.
+
+        >>> df.with_columns(
+        ...     c_pairs=pl.col("c").head(2).over("a", mapping_strategy="join")
+        ... )
+        shape: (5, 4)
+        ┌─────┬─────┬─────┬───────────┐
+        │ a   ┆ b   ┆ c   ┆ c_pairs   │
+        │ --- ┆ --- ┆ --- ┆ ---       │
+        │ str ┆ i64 ┆ i64 ┆ list[i64] │
+        ╞═════╪═════╪═════╪═══════════╡
+        │ a   ┆ 1   ┆ 5   ┆ [5, 4]    │
+        │ a   ┆ 2   ┆ 4   ┆ [5, 4]    │
+        │ b   ┆ 3   ┆ 3   ┆ [3, 2]    │
+        │ b   ┆ 5   ┆ 2   ┆ [3, 2]    │
+        │ b   ┆ 3   ┆ 1   ┆ [3, 2]    │
+        └─────┴─────┴─────┴───────────┘
+
+        Mapping strategy `explode` maps the values to new rows, changing the shape.
+
+        >>> df.select(
+        ...     c_first_2=pl.col("c").head(2).over("a", mapping_strategy="explode")
+        ... )
+        shape: (4, 1)
+        ┌───────────┐
+        │ c_first_2 │
+        │ ---       │
+        │ i64       │
+        ╞═══════════╡
+        │ 5         │
+        │ 4         │
+        │ 3         │
+        │ 2         │
+        └───────────┘
 
         You can use non-elementwise expressions with `over` too. By default they are
         evaluated using row-order, but you can specify a different one using `order_by`.
@@ -4549,7 +4619,6 @@ Consider using {self}.implode() instead"""
         pass_name
             Pass the Series name to the custom function (this is more expensive).
         returns_scalar
-
             .. deprecated:: 1.32.0
                 Is ignored and will be removed in 2.0.
         strategy : {'thread_local', 'threading'}
@@ -4855,6 +4924,8 @@ Consider using {self}.implode() instead"""
     def implode(self) -> Expr:
         """
         Aggregate values into a list.
+
+        The returned list itself is a scalar value of `list` dtype.
 
         Examples
         --------
@@ -5991,6 +6062,8 @@ Consider using {self}.implode() instead"""
 
         Parameters
         ----------
+        other
+            A literal or expression value to compare with.
         abs_tol
             Absolute tolerance. This is the maximum allowed absolute difference between
             two values. Must be non-negative.
@@ -7466,6 +7539,103 @@ Consider using {self}.implode() instead"""
             )
         )
 
+    @unstable()
+    def rolling_rank_by(
+        self,
+        by: IntoExpr,
+        window_size: timedelta | str,
+        method: RankMethod = "average",
+        *,
+        seed: int | None = None,
+        min_samples: int = 1,
+        closed: ClosedInterval = "right",
+    ) -> Expr:
+        """
+        Compute a rolling rank based on another column.
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        Given a `by` column `<t_0, t_1, ..., t_n>`, then `closed="right"`
+        (the default) means the windows will be:
+
+            - (t_0 - window_size, t_0]
+            - (t_1 - window_size, t_1]
+            - ...
+            - (t_n - window_size, t_n]
+
+        Parameters
+        ----------
+        by
+            Should be ``DateTime``, ``Date``, ``UInt64``, ``UInt32``, ``Int64``,
+            or ``Int32`` data type (note that the integral ones require using `'i'`
+            in `window size`).
+        window_size
+            The length of the window. Can be a dynamic
+            temporal size indicated by a timedelta or the following string language:
+
+            - 1ns   (1 nanosecond)
+            - 1us   (1 microsecond)
+            - 1ms   (1 millisecond)
+            - 1s    (1 second)
+            - 1m    (1 minute)
+            - 1h    (1 hour)
+            - 1d    (1 calendar day)
+            - 1w    (1 calendar week)
+            - 1mo   (1 calendar month)
+            - 1q    (1 calendar quarter)
+            - 1y    (1 calendar year)
+            - 1i    (1 index count)
+
+            By "calendar day", we mean the corresponding time on the next day
+            (which may not be 24 hours, due to daylight savings). Similarly for
+            "calendar week", "calendar month", "calendar quarter", and
+            "calendar year".
+        method : {'average', 'min', 'max', 'dense', 'random'}
+            The method used to assign ranks to tied elements.
+            The following methods are available (default is 'average'):
+
+            - 'average' : The average of the ranks that would have been assigned to
+              all the tied values is assigned to each value.
+            - 'min' : The minimum of the ranks that would have been assigned to all
+              the tied values is assigned to each value. (This is also referred to
+              as "competition" ranking.)
+            - 'max' : The maximum of the ranks that would have been assigned to all
+              the tied values is assigned to each value.
+            - 'dense' : Like 'min', but the rank of the next highest element is
+              assigned the rank immediately after those assigned to the tied
+              elements.
+            - 'random' : Choose a random rank for each value in a tie.
+        seed
+            Random seed used when `method='random'`. If set to None (default), a
+            random seed is generated for each rolling rank operation.
+        min_samples
+            The number of values in the window that should be non-null before computing
+            a result.
+        closed : {'left', 'right', 'both', 'none'}
+            Define which sides of the temporal interval are closed (inclusive),
+            defaults to `'right'`.
+
+        Returns
+        -------
+        Expr
+            An Expr of data :class:`.Float64` if `method` is `"average"` or,
+            the index size (see :func:`.get_index_type()`) otherwise.
+        """
+        window_size = _prepare_rolling_by_window_args(window_size)
+        by_pyexpr = parse_into_expression(by)
+        return wrap_expr(
+            self._pyexpr.rolling_rank_by(
+                by_pyexpr,
+                window_size,
+                method,
+                seed,
+                min_samples,
+                closed,
+            )
+        )
+
     @deprecate_renamed_parameter("min_periods", "min_samples", version="1.21.0")
     def rolling_min(
         self,
@@ -8393,6 +8563,89 @@ Consider using {self}.implode() instead"""
                 weights,
                 min_samples,
                 center=center,
+            )
+        )
+
+    @unstable()
+    def rolling_rank(
+        self,
+        window_size: int,
+        method: RankMethod = "average",
+        *,
+        seed: int | None = None,
+        min_samples: int | None = None,
+        center: bool = False,
+    ) -> Expr:
+        """
+        Compute a rolling rank.
+
+        .. warning::
+            This functionality is considered **unstable**. It may be changed
+            at any point without it being considered a breaking change.
+
+        A window of length `window_size` will traverse the array. The values
+        that fill this window will be ranked according to the `method`
+        parameter. The resulting values will be the rank of the value that is
+        at the end of the sliding window.
+
+        Parameters
+        ----------
+        window_size
+            Integer size of the rolling window.
+        method : {'average', 'min', 'max', 'dense', 'random'}
+            The method used to assign ranks to tied elements.
+            The following methods are available (default is 'average'):
+
+            - 'average' : The average of the ranks that would have been assigned to
+              all the tied values is assigned to each value.
+            - 'min' : The minimum of the ranks that would have been assigned to all
+              the tied values is assigned to each value. (This is also referred to
+              as "competition" ranking.)
+            - 'max' : The maximum of the ranks that would have been assigned to all
+              the tied values is assigned to each value.
+            - 'dense' : Like 'min', but the rank of the next highest element is
+              assigned the rank immediately after those assigned to the tied
+              elements.
+            - 'random' : Choose a random rank for each value in a tie.
+        seed
+            Random seed used when `method='random'`. If set to None (default), a
+            random seed is generated for each rolling rank operation.
+        min_samples
+            The number of values in the window that should be non-null before computing
+            a result. If set to `None` (default), it will be set equal to `window_size`.
+        center
+            Set the labels at the center of the window.
+
+        Returns
+        -------
+        Expr
+            An Expr of data :class:`.Float64` if `method` is `"average"` or,
+            the index size (see :func:`.get_index_type()`) otherwise.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"a": [1, 4, 4, 1, 9]})
+        >>> df.select(pl.col("a").rolling_rank(3, method="average"))
+            shape: (5, 1)
+            ┌──────┐
+            │ a    │
+            │ ---  │
+            │ f64  │
+            ╞══════╡
+            │ null │
+            │ null │
+            │ 2.5  │
+            │ 1.0  │
+            │ 3.0  │
+            └──────┘
+        """
+        return wrap_expr(
+            self._pyexpr.rolling_rank(
+                window_size,
+                method,
+                seed,
+                min_samples,
+                center,
             )
         )
 
@@ -10116,6 +10369,52 @@ Consider using {self}.implode() instead"""
         │ red   ┆ 0.333333 │
         │ green ┆ 0.166667 │
         └───────┴──────────┘
+
+        Note that `group_by` can be used to generate counts.
+
+        >>> df.group_by("color").len()  # doctest: +IGNORE_RESULT
+        shape: (3, 2)
+        ┌───────┬─────┐
+        │ color ┆ len │
+        │ ---   ┆ --- │
+        │ str   ┆ u32 │
+        ╞═══════╪═════╡
+        │ red   ┆ 2   │
+        │ green ┆ 1   │
+        │ blue  ┆ 3   │
+        └───────┴─────┘
+
+        To add counts as a new column `pl.len()` can be used as a window function.
+
+        >>> df.with_columns(pl.len().over("color"))
+        shape: (6, 2)
+        ┌───────┬─────┐
+        │ color ┆ len │
+        │ ---   ┆ --- │
+        │ str   ┆ u32 │
+        ╞═══════╪═════╡
+        │ red   ┆ 2   │
+        │ blue  ┆ 3   │
+        │ red   ┆ 2   │
+        │ green ┆ 1   │
+        │ blue  ┆ 3   │
+        │ blue  ┆ 3   │
+        └───────┴─────┘
+
+        >>> df.with_columns((pl.len().over("color") / pl.len()).alias("fraction"))
+        shape: (6, 2)
+        ┌───────┬──────────┐
+        │ color ┆ fraction │
+        │ ---   ┆ ---      │
+        │ str   ┆ f64      │
+        ╞═══════╪══════════╡
+        │ red   ┆ 0.333333 │
+        │ blue  ┆ 0.5      │
+        │ red   ┆ 0.333333 │
+        │ green ┆ 0.166667 │
+        │ blue  ┆ 0.5      │
+        │ blue  ┆ 0.5      │
+        └───────┴──────────┘
         """
         name = name or ("proportion" if normalize else "count")
         return wrap_expr(self._pyexpr.value_counts(sort, parallel, name, normalize))
@@ -10134,11 +10433,7 @@ Consider using {self}.implode() instead"""
         ...         "id": ["a", "b", "b", "c", "c", "c"],
         ...     }
         ... )
-        >>> df.select(
-        ...     [
-        ...         pl.col("id").unique_counts(),
-        ...     ]
-        ... )
+        >>> df.select(pl.col("id").unique_counts())
         shape: (3, 1)
         ┌─────┐
         │ id  │
@@ -10149,6 +10444,37 @@ Consider using {self}.implode() instead"""
         │ 2   │
         │ 3   │
         └─────┘
+
+        Note that `group_by` can be used to generate counts.
+
+        >>> df.group_by("id", maintain_order=True).len().select("len")
+        shape: (3, 1)
+        ┌─────┐
+        │ len │
+        │ --- │
+        │ u32 │
+        ╞═════╡
+        │ 1   │
+        │ 2   │
+        │ 3   │
+        └─────┘
+
+        To add counts as a new column `pl.len()` can be used as a window function.
+
+        >>> df.with_columns(pl.len().over("id"))
+        shape: (6, 2)
+        ┌─────┬─────┐
+        │ id  ┆ len │
+        │ --- ┆ --- │
+        │ str ┆ u32 │
+        ╞═════╪═════╡
+        │ a   ┆ 1   │
+        │ b   ┆ 2   │
+        │ b   ┆ 2   │
+        │ c   ┆ 3   │
+        │ c   ┆ 3   │
+        │ c   ┆ 3   │
+        └─────┴─────┘
         """
         return wrap_expr(self._pyexpr.unique_counts())
 

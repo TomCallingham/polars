@@ -1,8 +1,10 @@
 use polars_core::prelude::*;
+use polars_plan::constants::PL_ELEMENT_NAME;
 use polars_plan::prelude::expr_ir::ExprIR;
 use polars_plan::prelude::*;
 use recursive::recursive;
 
+use crate::dispatch::{function_expr_to_groups_udf, function_expr_to_udf};
 use crate::expressions as phys_expr;
 use crate::expressions::*;
 
@@ -175,20 +177,15 @@ fn create_physical_expr_inner(
             let output_field = aexpr.to_field(&ToFieldContext::new(expr_arena, schema))?;
             let function = *function;
             state.set_window();
-            let phys_function = create_physical_expr_inner(
-                function,
-                Context::Aggregation,
-                expr_arena,
-                schema,
-                state,
-            )?;
+            let phys_function =
+                create_physical_expr_inner(function, Context::Default, expr_arena, schema, state)?;
 
             let order_by = order_by
                 .map(|(node, options)| {
                     PolarsResult::Ok((
                         create_physical_expr_inner(
                             node,
-                            Context::Aggregation,
+                            Context::Default,
                             expr_arena,
                             schema,
                             state,
@@ -207,7 +204,7 @@ fn create_physical_expr_inner(
                     // TODO! Order by
                     let group_by = create_physical_expressions_from_nodes(
                         partition_by,
-                        Context::Aggregation,
+                        Context::Default,
                         expr_arena,
                         schema,
                         state,
@@ -307,6 +304,11 @@ fn create_physical_expr_inner(
             node_to_expr(expression, expr_arena),
             schema.clone(),
         ))),
+        Element => Ok(Arc::new(ColumnExpr::new(
+            PL_ELEMENT_NAME.clone(),
+            node_to_expr(expression, expr_arena),
+            schema.clone(),
+        ))),
         Sort { expr, options } => {
             let phys_expr = create_physical_expr_inner(*expr, ctxt, expr_arena, schema, state)?;
             Ok(Arc::new(SortExpr::new(
@@ -376,6 +378,7 @@ fn create_physical_expr_inner(
                         I::NUnique(_) => GBM::NUnique,
                         I::First(_) => GBM::First,
                         I::Last(_) => GBM::Last,
+                        I::Item(_) => GBM::Item,
                         I::Mean(_) => GBM::Mean,
                         I::Implode(_) => GBM::Implode,
                         I::Quantile { .. } => unreachable!(),
@@ -497,12 +500,14 @@ fn create_physical_expr_inner(
             Ok(Arc::new(ApplyExpr::new(
                 input,
                 SpecialEq::new(function),
+                None,
                 node_to_expr(expression, expr_arena),
                 *options,
                 state.allow_threading,
                 schema.clone(),
                 output_field,
                 is_scalar,
+                true,
             )))
         },
         Eval {
@@ -513,21 +518,12 @@ fn create_physical_expr_inner(
             let is_scalar = is_scalar_ae(expression, expr_arena);
             let evaluation_is_scalar = is_scalar_ae(*evaluation, expr_arena);
             let evaluation_is_elementwise = is_elementwise_rec(*evaluation, expr_arena);
+            // @NOTE: This is actually also something the downstream apply code should care about.
             let mut pd_group = ExprPushdownGroup::Pushable;
             pd_group.update_with_expr_rec(expr_arena.get(*evaluation), expr_arena, None);
+            let evaluation_is_fallible = matches!(pd_group, ExprPushdownGroup::Fallible);
 
-            let non_aggregated_output_field = expr_arena
-                .get(expression)
-                .to_field(&ToFieldContext::new(expr_arena, schema))?;
-            let output_field_with_ctx =
-                if matches!(ctxt, Context::Aggregation) && !is_scalar_ae(expression, expr_arena) {
-                    let mut f = non_aggregated_output_field.clone();
-                    f.coerce(non_aggregated_output_field.dtype().clone().implode());
-                    f
-                } else {
-                    non_aggregated_output_field.clone()
-                };
-            let non_aggregated_output_field = expr_arena
+            let output_field = expr_arena
                 .get(expression)
                 .to_field(&ToFieldContext::new(expr_arena, schema))?;
             let input_field = expr_arena
@@ -537,7 +533,8 @@ fn create_physical_expr_inner(
                 create_physical_expr_inner(*expr, Context::Default, expr_arena, schema, state)?;
 
             let element_dtype = variant.element_dtype(&input_field.dtype)?;
-            let eval_schema = Schema::from_iter([(PlSmallStr::EMPTY, element_dtype.clone())]);
+            let mut eval_schema = schema.as_ref().clone();
+            eval_schema.insert(PL_ELEMENT_NAME.clone(), element_dtype.clone());
             let evaluation = create_physical_expr_inner(
                 *evaluation,
                 // @Hack. Since EvalVariant::Array uses `evaluate_on_groups` to determine the
@@ -561,13 +558,11 @@ fn create_physical_expr_inner(
                 evaluation,
                 *variant,
                 node_to_expr(expression, expr_arena),
-                state.allow_threading,
-                output_field_with_ctx,
-                non_aggregated_output_field.dtype,
+                output_field,
                 is_scalar,
-                pd_group,
                 evaluation_is_scalar,
                 evaluation_is_elementwise,
+                evaluation_is_fallible,
             )))
         },
         Function {
@@ -581,16 +576,19 @@ fn create_physical_expr_inner(
                 .to_field(&ToFieldContext::new(expr_arena, schema))?;
             let input =
                 create_physical_expressions_from_irs(input, ctxt, expr_arena, schema, state)?;
+            let is_fallible = expr_arena.get(expression).is_fallible_top_level(expr_arena);
 
             Ok(Arc::new(ApplyExpr::new(
                 input,
-                function.clone().into(),
+                function_expr_to_udf(function.clone()),
+                function_expr_to_groups_udf(function),
                 node_to_expr(expression, expr_arena),
                 *options,
                 state.allow_threading,
                 schema.clone(),
                 output_field,
                 is_scalar,
+                is_fallible,
             )))
         },
         Slice {
@@ -624,11 +622,13 @@ fn create_physical_expr_inner(
             Ok(Arc::new(ApplyExpr::new(
                 vec![input],
                 function,
+                None,
                 node_to_expr(expression, expr_arena),
                 FunctionOptions::groupwise(),
                 state.allow_threading,
                 schema.clone(),
                 output_field,
+                false,
                 false,
             )))
         },
