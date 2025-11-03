@@ -169,8 +169,8 @@ impl SQLContext {
         Ok(res)
     }
 
-    /// add a function registry to the SQLContext
-    /// the registry provides the ability to add custom functions to the SQLContext
+    /// Add a function registry to the SQLContext.
+    /// The registry provides the ability to add custom functions to the SQLContext.
     pub fn with_function_registry(mut self, function_registry: Arc<dyn FunctionRegistry>) -> Self {
         self.function_registry = function_registry;
         self
@@ -222,14 +222,54 @@ impl SQLContext {
     }
 
     pub(super) fn get_table_from_current_scope(&self, name: &str) -> Option<LazyFrame> {
-        let table = self.table_map.get(name).cloned();
-        table
-            .or_else(|| self.cte_map.get(name).cloned())
+        // Resolve the table name in the current scope; multi-stage fallback
+        // * table name → cte name
+        // * table alias → cte alias
+        self.table_map
+            .get(name)
+            .or_else(|| self.cte_map.get(name))
             .or_else(|| {
-                self.table_aliases
-                    .get(name)
-                    .and_then(|alias| self.table_map.get(alias).cloned())
+                self.table_aliases.get(name).and_then(|alias| {
+                    self.table_map
+                        .get(alias.as_str())
+                        .or_else(|| self.cte_map.get(alias.as_str()))
+                })
             })
+            .cloned()
+    }
+
+    /// Execute a query in an isolated context. This prevents subqueries from mutating
+    /// arenas and other context state. Returns both the LazyFrame *and* its associated
+    /// Schema (so that the correct arenas are used when determining schema).
+    pub(crate) fn execute_isolated<F>(&mut self, query: F) -> PolarsResult<(LazyFrame, SchemaRef)>
+    where
+        F: FnOnce(&mut Self) -> PolarsResult<LazyFrame>,
+    {
+        // Save key state (arenas and lookups)
+        let (joined_aliases, table_aliases, lp_arena, expr_arena, table_map) = (
+            // "take" to ensure subqueries start with clean state
+            std::mem::take(&mut self.joined_aliases),
+            std::mem::take(&mut self.table_aliases),
+            std::mem::take(&mut self.lp_arena),
+            std::mem::take(&mut self.expr_arena),
+            // "clone" to allow subqueries to see registered tables
+            self.table_map.clone(),
+        );
+
+        // Execute query with clean state (eg: nested/subquery)
+        let mut lf = query(self)?;
+        let schema = self.get_frame_schema(&mut lf)?;
+
+        // Restore saved state
+        lf.set_cached_arena(
+            std::mem::replace(&mut self.lp_arena, lp_arena),
+            std::mem::replace(&mut self.expr_arena, expr_arena),
+        );
+        self.joined_aliases = joined_aliases;
+        self.table_aliases = table_aliases;
+        self.table_map = table_map;
+
+        Ok((lf, schema))
     }
 
     fn expr_or_ordinal(
@@ -363,28 +403,27 @@ impl SQLContext {
         };
         let mut lf = self.process_query(left, query)?;
         let mut rf = self.process_query(right, query)?;
-        let join = lf
-            .clone()
-            .join_builder()
-            .with(rf.clone())
-            .how(join_type)
-            .join_nulls(true);
-
         let lf_schema = self.get_frame_schema(&mut lf)?;
-        let lf_cols: Vec<_> = lf_schema.iter_names().map(|nm| col(nm.clone())).collect();
-        let joined_tbl = match quantifier {
-            SetQuantifier::ByName => join.on(lf_cols).finish(),
+
+        let lf_cols: Vec<_> = lf_schema.iter_names_cloned().map(col).collect();
+        let rf_cols = match quantifier {
+            SetQuantifier::ByName => None,
             SetQuantifier::Distinct | SetQuantifier::None => {
                 let rf_schema = self.get_frame_schema(&mut rf)?;
-                let rf_cols: Vec<_> = rf_schema.iter_names().map(|nm| col(nm.clone())).collect();
+                let rf_cols: Vec<_> = rf_schema.iter_names_cloned().map(col).collect();
                 if lf_cols.len() != rf_cols.len() {
                     polars_bail!(SQLInterface: "{} requires equal number of columns in each table (use '{} BY NAME' to combine mismatched tables)", op_name, op_name)
                 }
-                join.left_on(lf_cols).right_on(rf_cols).finish()
+                Some(rf_cols)
             },
             _ => {
                 polars_bail!(SQLInterface: "'{} {}' is not supported", op_name, quantifier.to_string())
             },
+        };
+        let join = lf.join_builder().with(rf).how(join_type).join_nulls(true);
+        let joined_tbl = match rf_cols {
+            Some(rf_cols) => join.left_on(lf_cols).right_on(rf_cols).finish(),
+            None => join.on(lf_cols).finish(),
         };
         Ok(joined_tbl.unique(None, UniqueKeepStrategy::Any))
     }
@@ -540,7 +579,7 @@ impl SQLContext {
                 .lazy())
             } else {
                 // apply constraint as inverted filter (drops rows matching the selection)
-                Ok(self.process_where(lf.clone(), selection, true)?)
+                Ok(self.process_where(lf.clone(), selection, true, None)?)
             }
         } else {
             polars_bail!(SQLInterface: "unexpected statement type; expected DELETE")
@@ -714,7 +753,7 @@ impl SQLContext {
 
         // Filter expression (WHERE clause)
         let schema = self.get_frame_schema(&mut lf)?;
-        lf = self.process_where(lf, &select_stmt.selection, false)?;
+        lf = self.process_where(lf, &select_stmt.selection, false, Some(schema.clone()))?;
 
         // 'SELECT *' modifiers
         let mut select_modifiers = SelectModifiers {
@@ -980,9 +1019,13 @@ impl SQLContext {
         mut lf: LazyFrame,
         expr: &Option<SQLExpr>,
         invert_filter: bool,
+        schema: Option<SchemaRef>,
     ) -> PolarsResult<LazyFrame> {
         if let Some(expr) = expr {
-            let schema = self.get_frame_schema(&mut lf)?;
+            let schema = match schema {
+                None => self.get_frame_schema(&mut lf)?,
+                Some(s) => s,
+            };
 
             // shortcut filter evaluation if given expression is just TRUE or FALSE
             let (all_true, all_false) = match expr {
@@ -1692,25 +1735,18 @@ impl ExprSqlProjectionHeightBehavior {
 
         for e in expr.into_iter() {
             use Expr::*;
-
             has_column |= matches!(e, Column(_) | Selector(_));
-
             has_independent |= match e {
                 // @TODO: This is broken now with functions.
                 AnonymousFunction { options, .. } => {
                     options.returns_scalar() || !options.is_length_preserving()
                 },
-
                 Literal(v) => !v.is_scalar(),
-
                 Explode { .. } | Filter { .. } | Gather { .. } | Slice { .. } => true,
-
                 Agg { .. } | Len => true,
-
                 _ => false,
             }
         }
-
         if has_independent {
             Self::Independent
         } else if has_column {
