@@ -7,6 +7,7 @@ mod bitwise;
 mod convert;
 mod count;
 mod first_last;
+mod first_last_nonnull;
 mod len;
 mod mean;
 mod min_max;
@@ -67,7 +68,10 @@ pub trait GroupedReduction: Any + Send + Sync {
         seq_id: u64,
     ) -> PolarsResult<()> {
         assert!(values.len() < (1 << (IdxSize::BITS - 1)));
-        let evict_group_idxs = core::mem::transmute::<&[IdxSize], &[EvictIdx]>(group_idxs);
+        // SAFETY: EvictIdx is a wrapper for IdxSize and has same alignment.
+        let evict_group_idxs = unsafe {
+            std::slice::from_raw_parts(group_idxs.as_ptr() as *const EvictIdx, subset.len())
+        };
         self.update_groups_while_evicting(values, subset, evict_group_idxs, seq_id)
     }
 
@@ -219,7 +223,7 @@ pub struct VecGroupedReduction<R: Reducer> {
 }
 
 impl<R: Reducer> VecGroupedReduction<R> {
-    fn new(in_dtype: DataType, reducer: R) -> Self {
+    pub fn new(in_dtype: DataType, reducer: R) -> Self {
         Self {
             values: Vec::new(),
             evicted_values: Vec::new(),
@@ -486,7 +490,7 @@ where
 }
 
 #[derive(Clone)]
-struct NullGroupedReduction {
+pub struct NullGroupedReduction {
     num_groups: IdxSize,
     num_evictions: IdxSize,
     output: Scalar,

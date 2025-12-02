@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 
 use polars_core::frame::row::Row;
 use polars_core::prelude::*;
@@ -9,10 +9,11 @@ use polars_plan::prelude::*;
 use polars_utils::format_pl_smallstr;
 use sqlparser::ast::{
     BinaryOperator, CreateTable, Delete, Distinct, ExcludeSelectItem, Expr as SQLExpr, FromTable,
-    FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Offset,
-    OrderBy, Query, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
-    Statement, TableAlias, TableFactor, TableWithJoins, UnaryOperator, Value as SQLValue, Values,
-    WildcardAdditionalOptions,
+    FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, NamedWindowDefinition,
+    NamedWindowExpr, ObjectName, ObjectType, Offset, OrderBy, Query, RenameSelectItem, Select,
+    SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias, TableFactor,
+    TableWithJoins, UnaryOperator, Value as SQLValue, Values, Visit, Visitor,
+    WildcardAdditionalOptions, WindowSpec,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -22,6 +23,7 @@ use crate::sql_expr::{
     parse_sql_array, parse_sql_expr, resolve_compound_identifier, to_sql_interface_err,
 };
 use crate::table_functions::PolarsTableFunctions;
+use crate::types::map_sql_dtype_to_polars;
 
 #[derive(Clone)]
 pub struct TableInfo {
@@ -62,6 +64,7 @@ pub struct SQLContext {
     cte_map: PlHashMap<String, LazyFrame>,
     table_aliases: PlHashMap<String, String>,
     joined_aliases: PlHashMap<String, PlHashMap<String, String>>,
+    pub(crate) named_windows: PlHashMap<String, WindowSpec>,
 }
 
 impl Default for SQLContext {
@@ -72,6 +75,7 @@ impl Default for SQLContext {
             cte_map: Default::default(),
             table_aliases: Default::default(),
             joined_aliases: Default::default(),
+            named_windows: Default::default(),
             lp_arena: Default::default(),
             expr_arena: Default::default(),
         }
@@ -165,6 +169,7 @@ impl SQLContext {
         self.cte_map.clear();
         self.table_aliases.clear();
         self.joined_aliases.clear();
+        self.named_windows.clear();
 
         Ok(res)
     }
@@ -450,7 +455,12 @@ impl SQLContext {
                 if lf_schema.len() != rf_schema.len() {
                     polars_bail!(SQLInterface: "UNION requires equal number of columns in each table (use 'UNION BY NAME' to combine mismatched tables)")
                 }
-                let concatenated = polars_lazy::dsl::concat(vec![lf, rf], opts);
+                // rename `rf` columns to match `lf` if they differ; SQL behaves
+                // positionally on UNION ops (unless using the "BY NAME" qualifier)
+                if lf_schema.iter_names().ne(rf_schema.iter_names()) {
+                    rf = rf.rename(rf_schema.iter_names(), lf_schema.iter_names(), true);
+                }
+                let concatenated = concat(vec![lf, rf], opts);
                 match quantifier {
                     SetQuantifier::Distinct | SetQuantifier::None => {
                         concatenated.map(|lf| lf.unique(None, UniqueKeepStrategy::Any))
@@ -640,6 +650,30 @@ impl SQLContext {
         Ok(())
     }
 
+    fn register_named_windows(
+        &mut self,
+        named_windows: &[NamedWindowDefinition],
+    ) -> PolarsResult<()> {
+        for NamedWindowDefinition(name, expr) in named_windows {
+            let spec = match expr {
+                NamedWindowExpr::NamedWindow(ref_name) => self
+                    .named_windows
+                    .get(&ref_name.value)
+                    .ok_or_else(|| {
+                        polars_err!(
+                            SQLInterface:
+                            "named window '{}' references undefined window '{}'",
+                            name.value, ref_name.value
+                        )
+                    })?
+                    .clone(),
+                NamedWindowExpr::WindowSpec(spec) => spec.clone(),
+            };
+            self.named_windows.insert(name.value.clone(), spec);
+        }
+        Ok(())
+    }
+
     /// execute the 'FROM' part of the query
     fn execute_from_statement(&mut self, tbl_expr: &TableWithJoins) -> PolarsResult<LazyFrame> {
         let (l_name, mut lf) = self.get_table(&tbl_expr.relation)?;
@@ -737,8 +771,62 @@ impl SQLContext {
         Ok(lf)
     }
 
+    /// Check that the SELECT statement only contains supported clauses.
+    fn validate_select(&self, select_stmt: &Select) -> PolarsResult<()> {
+        // Destructure "Select" exhaustively; that way if/when new fields are added in
+        // future sqlparser versions, we'll get a compilation error and can handle them
+        let Select {
+            // Supported clauses
+            distinct: _,
+            from: _,
+            group_by: _,
+            having: _,
+            named_window: _,
+            projection: _,
+            selection: _,
+
+            // Metadata/token fields (can ignore)
+            select_token: _,
+            top_before_distinct: _,
+            window_before_qualify: _,
+
+            // Unsupported clauses
+            ref cluster_by,
+            ref connect_by,
+            ref distribute_by,
+            ref into,
+            ref lateral_views,
+            ref prewhere,
+            ref qualify,
+            ref sort_by,
+            ref top,
+            ref value_table_mode,
+        } = *select_stmt;
+
+        // Raise specific error messages for unsupported attributes
+        polars_ensure!(cluster_by.is_empty(), SQLInterface: "`CLUSTER BY` clause is not supported");
+        polars_ensure!(connect_by.is_none(), SQLInterface: "`CONNECT BY` clause is not supported");
+        polars_ensure!(distribute_by.is_empty(), SQLInterface: "`DISTRIBUTE BY` clause is not supported");
+        polars_ensure!(into.is_none(), SQLInterface: "`SELECT INTO`clause  is not supported");
+        polars_ensure!(lateral_views.is_empty(), SQLInterface: "`LATERAL VIEW` clause is not supported");
+        polars_ensure!(prewhere.is_none(), SQLInterface: "`PREWHERE` clause is not supported");
+        polars_ensure!(qualify.is_none(), SQLInterface: "`QUALIFY` clause is not supported");
+        polars_ensure!(sort_by.is_empty(), SQLInterface: "SORT BY` clause is not supported; use `ORDER BY` instead");
+        polars_ensure!(top.is_none(), SQLInterface: "`TOP` clause is not supported; use `LIMIT` instead");
+        polars_ensure!(value_table_mode.is_none(), SQLInterface: "`SELECT AS VALUE/STRUCT` is not supported");
+
+        Ok(())
+    }
+
     /// Execute the 'SELECT' part of the query.
     fn execute_select(&mut self, select_stmt: &Select, query: &Query) -> PolarsResult<LazyFrame> {
+        // Check that the statement doesn't contain unsupported SELECT clauses
+        self.validate_select(select_stmt)?;
+
+        // Parse named windows first, as they may be referenced in the SELECT clause
+        self.register_named_windows(&select_stmt.named_window)?;
+
+        // Get `FROM` table/data
         let mut lf = if select_stmt.from.is_empty() {
             DataFrame::empty().lazy()
         } else {
@@ -751,11 +839,11 @@ impl SQLContext {
             self.execute_from_statement(from.first().unwrap())?
         };
 
-        // Filter expression (WHERE clause)
-        let schema = self.get_frame_schema(&mut lf)?;
+        // Apply `WHERE` constraint
+        let mut schema = self.get_frame_schema(&mut lf)?;
         lf = self.process_where(lf, &select_stmt.selection, false, Some(schema.clone()))?;
 
-        // 'SELECT *' modifiers
+        // Determine projections
         let mut select_modifiers = SelectModifiers {
             ilike: None,
             exclude: PlHashSet::new(),
@@ -763,7 +851,65 @@ impl SQLContext {
             replace: vec![],
         };
 
-        let projections = self.column_projections(select_stmt, &schema, &mut select_modifiers)?;
+        let mut projections =
+            self.column_projections(select_stmt, &schema, &mut select_modifiers)?;
+
+        // Apply `UNNEST` expressions
+        let mut explode_names = Vec::new();
+        let mut explode_exprs = Vec::new();
+        let mut explode_lookup = PlHashMap::new();
+
+        for expr in &projections {
+            for e in expr {
+                if let Expr::Explode { input, .. } = e {
+                    match input.as_ref() {
+                        Expr::Column(name) => explode_names.push(name.clone()),
+                        other_expr => {
+                            // Note: skip aggregate expressions; those are handled in the GROUP BY phase
+                            if !has_expr(other_expr, |e| matches!(e, Expr::Agg(_) | Expr::Len)) {
+                                let temp_name = PlSmallStr::from(format!(
+                                    "__POLARS_UNNEST_{}",
+                                    explode_exprs.len()
+                                ));
+                                explode_exprs.push(other_expr.clone().alias(temp_name.as_str()));
+                                explode_lookup.insert(other_expr.clone(), temp_name.clone());
+                                explode_names.push(temp_name);
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        if !explode_names.is_empty() {
+            if !explode_exprs.is_empty() {
+                lf = lf.with_columns(explode_exprs);
+            }
+            lf = lf.explode(
+                Selector::ByName {
+                    names: Arc::from(explode_names),
+                    strict: true,
+                },
+                ExplodeOptions {
+                    empty_as_null: true,
+                    keep_nulls: true,
+                },
+            );
+            projections = projections
+                .into_iter()
+                .map(|p| {
+                    // Update "projections" with column refs to the now-exploded expressions
+                    p.map_expr(|e| match e {
+                        Expr::Explode { input, .. } => explode_lookup
+                            .get(input.as_ref())
+                            .map(|name| Expr::Column(name.clone()))
+                            .unwrap_or_else(|| input.as_ref().clone()),
+                        _ => e,
+                    })
+                })
+                .collect();
+
+            schema = self.get_frame_schema(&mut lf)?;
+        }
 
         // Check for "GROUP BY ..." (after determining projections)
         let mut group_by_keys: Vec<Expr> = Vec::new();
@@ -809,7 +955,17 @@ impl SQLContext {
                         if !has_expr(expr, |e| {
                             matches!(e, Expr::Agg(_))
                                 || matches!(e, Expr::Len)
-                                || matches!(e, Expr::Window { .. })
+                                || matches!(e, Expr::Over { .. })
+                                || {
+                                    #[cfg(feature = "dynamic_group_by")]
+                                    {
+                                        matches!(e, Expr::Rolling { .. })
+                                    }
+                                    #[cfg(not(feature = "dynamic_group_by"))]
+                                    {
+                                        false
+                                    }
+                                }
                         }) {
                             group_by_keys.push(expr.clone())
                         }
@@ -866,7 +1022,6 @@ impl SQLContext {
                     // height. E.g.:
                     //
                     // * SELECT COUNT(*) FROM df ORDER BY sort_key;
-                    // * SELECT UNNEST(list_col) FROM df ORDER BY sort_key;
                     //
                     // For these cases we truncate / extend the sorting columns with NULLs to match
                     // the output height. We do this by projecting independently and then joining
@@ -1067,8 +1222,12 @@ impl SQLContext {
         constraint: &JoinConstraint,
         join_type: JoinType,
     ) -> PolarsResult<LazyFrame> {
-        let (left_on, right_on) = process_join_constraint(constraint, tbl_left, tbl_right)?;
-
+        let (left_on, right_on) = process_join_constraint(constraint, tbl_left, tbl_right, self)?;
+        let coalesce_type = match constraint {
+            // "NATURAL" joins should coalesce; otherwise we disambiguate
+            JoinConstraint::Natural => JoinCoalesce::CoalesceColumns,
+            _ => JoinCoalesce::KeepColumns,
+        };
         let joined = tbl_left
             .frame
             .clone()
@@ -1078,7 +1237,7 @@ impl SQLContext {
             .right_on(right_on)
             .how(join_type)
             .suffix(format!(":{}", tbl_right.name))
-            .coalesce(JoinCoalesce::KeepColumns)
+            .coalesce(coalesce_type)
             .finish();
 
         Ok(joined)
@@ -1099,7 +1258,6 @@ impl SQLContext {
                 e => e,
             })
         }
-
         if contexts.is_empty() {
             lf
         } else {
@@ -1112,27 +1270,65 @@ impl SQLContext {
             if_not_exists,
             name,
             query,
+            columns,
+            like,
             ..
         }) = stmt
         {
             let tbl_name = name.0.first().unwrap().value.as_str();
-            // CREATE TABLE IF NOT EXISTS
             if *if_not_exists && self.table_map.contains_key(tbl_name) {
                 polars_bail!(SQLInterface: "relation '{}' already exists", tbl_name);
-                // CREATE OR REPLACE TABLE
             }
-            if let Some(query) = query {
-                let lf = self.execute_query(query)?;
-                self.register(tbl_name, lf);
-                let out = df! {
-                    "Response" => ["CREATE TABLE"]
-                }
-                .unwrap()
-                .lazy();
-                Ok(out)
-            } else {
-                polars_bail!(SQLInterface: "only `CREATE TABLE AS SELECT ...` is currently supported");
-            }
+            let lf = match (query, columns.is_empty(), like) {
+                (Some(query), true, None) => {
+                    // ----------------------------------------------------
+                    // CREATE TABLE [IF NOT EXISTS] <name> AS <query>
+                    // ----------------------------------------------------
+                    self.execute_query(query)?
+                },
+                (None, false, None) => {
+                    // ----------------------------------------------------
+                    // CREATE TABLE [IF NOT EXISTS] <name> (<coldef>, ...)
+                    // ----------------------------------------------------
+                    let mut schema = Schema::with_capacity(columns.len());
+                    for col in columns {
+                        let col_name = col.name.value.as_str();
+                        let dtype = map_sql_dtype_to_polars(&col.data_type)?;
+                        schema.insert_at_index(schema.len(), col_name.into(), dtype)?;
+                    }
+                    DataFrame::empty_with_schema(&schema).lazy()
+                },
+                (None, true, Some(from_name)) => {
+                    // ----------------------------------------------------
+                    // CREATE TABLE [IF NOT EXISTS] <name> LIKE <table>
+                    // ----------------------------------------------------
+                    let like_table = from_name.0.first().unwrap().value.as_str();
+                    if let Some(mut table) = self.table_map.get(like_table).cloned() {
+                        let schema = self.get_frame_schema(&mut table)?;
+                        DataFrame::empty_with_schema(&schema).lazy()
+                    } else {
+                        polars_bail!(SQLInterface: "table given in LIKE does not exist: {}", like_table)
+                    }
+                },
+                // No valid options provided
+                (None, true, None) => {
+                    polars_bail!(SQLInterface: "CREATE TABLE expected a query, column definitions, or LIKE clause")
+                },
+                // Mutually exclusive options
+                _ => {
+                    polars_bail!(
+                        SQLInterface: "CREATE TABLE received mutually exclusive options:\nquery = {:?}\ncolumns = {:?}\nlike = {:?}",
+                        query,
+                        columns,
+                        like,
+                    )
+                },
+            };
+            self.register(tbl_name, lf);
+
+            let df_created =
+                df! { "Response" => [format!("CREATE TABLE {}", name.0.first().unwrap().value)] };
+            Ok(df_created.unwrap().lazy())
         } else {
             unreachable!()
         }
@@ -1228,7 +1424,6 @@ impl SQLContext {
 
                     if *with_offset {
                         // TODO: support 'WITH ORDINALITY|OFFSET' modifier.
-                        //  (note that 'WITH OFFSET' is BigQuery-specific syntax, not PostgreSQL)
                         polars_bail!(SQLInterface: "UNNEST tables do not (yet) support WITH ORDINALITY|OFFSET");
                     }
                     let table_name = alias.name.value.clone();
@@ -1340,7 +1535,8 @@ impl SQLContext {
                 format!("group_by keys contained duplicate output name '{duplicate_name}'")
             })?;
 
-        // Remove the group_by keys as polars adds those implicitly.
+        // Note: remove the `group_by` keys as Polars adds those implicitly.
+        let mut aliased_aggregations: PlHashMap<PlSmallStr, PlSmallStr> = PlHashMap::new();
         let mut aggregation_projection = Vec::with_capacity(projections.len());
         let mut projection_overrides = PlHashMap::with_capacity(projections.len());
         let mut projection_aliases = PlHashSet::new();
@@ -1350,7 +1546,9 @@ impl SQLContext {
             // `Len` represents COUNT(*) so we treat as an aggregation here.
             let is_non_group_key_expr = has_expr(e, |e| {
                 match e {
-                    Expr::Agg(_) | Expr::Len | Expr::Window { .. } => true,
+                    Expr::Agg(_) | Expr::Len | Expr::Over { .. } => true,
+                    #[cfg(feature = "dynamic_group_by")]
+                    Expr::Rolling { .. } => true,
                     Expr::Function { function: func, .. }
                         if !matches!(func, FunctionExpr::StructExpr(_)) =>
                     {
@@ -1382,7 +1580,7 @@ impl SQLContext {
                 }
             }
             let field = e.to_field(&schema_before)?;
-            if group_by_keys_schema.get(&field.name).is_none() && is_non_group_key_expr {
+            if is_non_group_key_expr {
                 let mut e = e.clone();
                 if let Expr::Agg(AggExpr::Implode(expr)) = &e {
                     e = (**expr).clone();
@@ -1390,6 +1588,13 @@ impl SQLContext {
                     if let Expr::Agg(AggExpr::Implode(expr)) = expr.as_ref() {
                         e = (**expr).clone().alias(name.clone());
                     }
+                }
+                // If aggregation colname conflicts with a group key,
+                // alias it to avoid duplicate/mis-tracked columns
+                if group_by_keys_schema.get(&field.name).is_some() {
+                    let alias_name = format!("__POLARS_AGG_{}", field.name);
+                    e = e.alias(alias_name.as_str());
+                    aliased_aggregations.insert(field.name.clone(), alias_name.as_str().into());
                 }
                 aggregation_projection.push(e);
             } else if let Expr::Column(_)
@@ -1417,11 +1622,19 @@ impl SQLContext {
             .map(|(name, projection_expr)| {
                 if let Some(expr) = projection_overrides.get(name.as_str()) {
                     expr.clone()
+                } else if let Some(aliased_name) = aliased_aggregations.get(name) {
+                    col(aliased_name.clone()).alias(name.clone())
                 } else if group_by_keys_schema.get(name).is_some()
                     || projection_aliases.contains(name.as_str())
                     || group_key_aliases.contains(name.as_str())
                 {
-                    projection_expr.clone()
+                    if has_expr(projection_expr, |e| {
+                        matches!(e, Expr::Agg(_) | Expr::Len | Expr::Over { .. })
+                    }) {
+                        col(name.clone())
+                    } else {
+                        projection_expr.clone()
+                    }
                 } else {
                     col(name.clone())
                 }
@@ -1539,12 +1752,12 @@ impl SQLContext {
         // SELECT * RENAME
         if let Some(items) = &options.opt_rename {
             let renames = match items {
-                RenameSelectItem::Single(rename) => vec![rename],
-                RenameSelectItem::Multiple(renames) => renames.iter().collect(),
+                RenameSelectItem::Single(rename) => std::slice::from_ref(rename),
+                RenameSelectItem::Multiple(renames) => renames.as_slice(),
             };
             for rn in renames {
-                let (before, after) = (rn.ident.value.as_str(), rn.alias.value.as_str());
-                let (before, after) = (PlSmallStr::from_str(before), PlSmallStr::from_str(after));
+                let before = PlSmallStr::from_str(rn.ident.value.as_str());
+                let after = PlSmallStr::from_str(rn.alias.value.as_str());
                 if before != after {
                     modifiers.rename.insert(before, after);
                 }
@@ -1602,27 +1815,6 @@ impl SQLContext {
     }
 }
 
-fn collect_compound_identifiers(
-    left: &[Ident],
-    right: &[Ident],
-    left_name: &str,
-    right_name: &str,
-) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
-    if left.len() == 2 && right.len() == 2 {
-        let (tbl_a, col_name_a) = (left[0].value.as_str(), left[1].value.as_str());
-        let (tbl_b, col_name_b) = (right[0].value.as_str(), right[1].value.as_str());
-
-        // switch left/right operands if the caller has them in reverse
-        if left_name == tbl_b || right_name == tbl_a {
-            Ok((vec![col(col_name_b)], vec![col(col_name_a)]))
-        } else {
-            Ok((vec![col(col_name_a)], vec![col(col_name_b)]))
-        }
-    } else {
-        polars_bail!(SQLInterface: "collect_compound_identifiers: Expected left.len() == 2 && right.len() == 2, but found left.len() == {:?}, right.len() == {:?}", left.len(), right.len());
-    }
-}
-
 fn expand_exprs(expr: Expr, schema: &SchemaRef) -> Vec<Expr> {
     match expr {
         Expr::Column(nm) if is_regex_colname(nm.as_str()) => {
@@ -1647,36 +1839,179 @@ fn is_regex_colname(nm: &str) -> bool {
     nm.starts_with('^') && nm.ends_with('$')
 }
 
+/// Visitor that checks if an expression tree contains a reference to a specific table.
+struct FindTableIdentifier<'a> {
+    table_name: &'a str,
+    found: bool,
+}
+
+impl<'a> Visitor for FindTableIdentifier<'a> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &SQLExpr) -> ControlFlow<Self::Break> {
+        if let SQLExpr::CompoundIdentifier(idents) = expr {
+            if idents.len() >= 2 && idents[0].value.as_str() == self.table_name {
+                self.found = true; // return immediately on first match
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Check if all columns referred to in a Polars expression exist in the given Schema.
+fn expr_cols_all_in_schema(expr: &Expr, schema: &Schema) -> bool {
+    let mut found_cols = false;
+    let mut all_in_schema = true;
+    for e in expr.into_iter() {
+        if let Expr::Column(name) = e {
+            found_cols = true;
+            if !schema.contains(name.as_str()) {
+                all_in_schema = false;
+                break;
+            }
+        }
+    }
+    found_cols && all_in_schema
+}
+
+/// Check if a SQL expression contains a reference to a specific table.
+fn expr_refers_to_table(expr: &SQLExpr, table_name: &str) -> bool {
+    let mut table_finder = FindTableIdentifier {
+        table_name,
+        found: false,
+    };
+    let _ = expr.visit(&mut table_finder);
+    table_finder.found
+}
+
+/// Determine which parsed join expressions actually belong in `left_om` and which in `right_on`.
+///
+/// This needs to be handled carefully because in SQL joins you can write "join on" constraints
+/// either way round, and in joins with more than two tables you can also join against an earlier
+/// table (e.g.: you could be joining `df1` to `df2` to `df3`, but the final join condition where
+/// we join  `df2` to `df3` could refer to `df1.a = df3.b`; this takes a little more work to
+/// resolve as our native `join` function operates on only two tables at a time.
+fn determine_left_right_join_on(
+    ctx: &mut SQLContext,
+    expr_left: &SQLExpr,
+    expr_right: &SQLExpr,
+    tbl_left: &TableInfo,
+    tbl_right: &TableInfo,
+    join_schema: &Schema,
+) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
+    // parse, removing any aliases that may have been added by `resolve_column`
+    // (called inside `parse_sql_expr`) as we need the actual/underlying col
+    let left_on = match parse_sql_expr(expr_left, ctx, Some(join_schema))? {
+        Expr::Alias(inner, _) => Arc::unwrap_or_clone(inner),
+        e => e,
+    };
+    let right_on = match parse_sql_expr(expr_right, ctx, Some(join_schema))? {
+        Expr::Alias(inner, _) => Arc::unwrap_or_clone(inner),
+        e => e,
+    };
+
+    // ------------------------------------------------------------------
+    // simple/typical case: can fully resolve SQL-level table references
+    // ------------------------------------------------------------------
+    let left_refs = (
+        expr_refers_to_table(expr_left, &tbl_left.name),
+        expr_refers_to_table(expr_left, &tbl_right.name),
+    );
+    let right_refs = (
+        expr_refers_to_table(expr_right, &tbl_left.name),
+        expr_refers_to_table(expr_right, &tbl_right.name),
+    );
+    // if the SQL-level references unambiguously indicate table ownership, we're done
+    match (left_refs, right_refs) {
+        // standard: left expr → left table, right expr → right table
+        ((true, false), (false, true)) => return Ok((vec![left_on], vec![right_on])),
+        // reversed: left expr → right table, right expr → left table
+        ((false, true), (true, false)) => return Ok((vec![right_on], vec![left_on])),
+        // unsupported: one side references *both* tables
+        ((true, true), _) | (_, (true, true)) if tbl_left.name != tbl_right.name => {
+            polars_bail!(
+               SQLInterface: "unsupported join condition: {} side references both '{}' and '{}'",
+               if left_refs.0 && left_refs.1 {
+                    "left"
+                } else {
+                    "right"
+                }, tbl_left.name, tbl_right.name
+            )
+        },
+        // fall through to the more involved col/ref resolution
+        _ => {},
+    }
+
+    // ------------------------------------------------------------------
+    // more involved: additionally employ schema-based column resolution
+    // (applies to unqualified columns and/or chained joins)
+    // ------------------------------------------------------------------
+    let left_on_cols_in = (
+        expr_cols_all_in_schema(&left_on, &tbl_left.schema),
+        expr_cols_all_in_schema(&left_on, &tbl_right.schema),
+    );
+    let right_on_cols_in = (
+        expr_cols_all_in_schema(&right_on, &tbl_left.schema),
+        expr_cols_all_in_schema(&right_on, &tbl_right.schema),
+    );
+    match (left_on_cols_in, right_on_cols_in) {
+        // each expression's columns exist in exactly one schema
+        ((true, false), (false, true)) => Ok((vec![left_on], vec![right_on])),
+        ((false, true), (true, false)) => Ok((vec![right_on], vec![left_on])),
+        // one expression in both, other only in one; prefer the unique one
+        ((true, true), (true, false)) => Ok((vec![right_on], vec![left_on])),
+        ((true, true), (false, true)) => Ok((vec![left_on], vec![right_on])),
+        ((true, false), (true, true)) => Ok((vec![left_on], vec![right_on])),
+        ((false, true), (true, true)) => Ok((vec![right_on], vec![left_on])),
+        // pass through as-is
+        _ => Ok((vec![left_on], vec![right_on])),
+    }
+}
+
 fn process_join_on(
-    expression: &sqlparser::ast::Expr,
+    ctx: &mut SQLContext,
+    sql_expr: &SQLExpr,
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
 ) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
-    match expression {
+    match sql_expr {
         SQLExpr::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => {
-                let (mut left_i, mut right_i) = process_join_on(left, tbl_left, tbl_right)?;
-                let (mut left_j, mut right_j) = process_join_on(right, tbl_left, tbl_right)?;
+                let (mut left_i, mut right_i) = process_join_on(ctx, left, tbl_left, tbl_right)?;
+                let (mut left_j, mut right_j) = process_join_on(ctx, right, tbl_left, tbl_right)?;
                 left_i.append(&mut left_j);
                 right_i.append(&mut right_j);
                 Ok((left_i, right_i))
             },
-            BinaryOperator::Eq => match (left.as_ref(), right.as_ref()) {
-                (SQLExpr::CompoundIdentifier(left), SQLExpr::CompoundIdentifier(right)) => {
-                    collect_compound_identifiers(left, right, &tbl_left.name, &tbl_right.name)
-                },
-                _ => {
-                    polars_bail!(SQLInterface: "only equi-join constraints (on identifiers) are currently supported; found lhs={:?}, rhs={:?}", left, right)
-                },
+            BinaryOperator::Eq => {
+                // establish unified schema with cols from both tables; needed for multi/chained
+                // joins where suffixed intermediary/joined cols aren't in an existing schema.
+                let mut join_schema =
+                    Schema::with_capacity(tbl_left.schema.len() + tbl_right.schema.len());
+                for (name, dtype) in tbl_left.schema.iter() {
+                    join_schema.insert_at_index(join_schema.len(), name.clone(), dtype.clone())?;
+                }
+                for (name, dtype) in tbl_right.schema.iter() {
+                    if !join_schema.contains(name) {
+                        join_schema.insert_at_index(
+                            join_schema.len(),
+                            name.clone(),
+                            dtype.clone(),
+                        )?;
+                    }
+                }
+                determine_left_right_join_on(ctx, left, right, tbl_left, tbl_right, &join_schema)
             },
-            _ => {
-                polars_bail!(SQLInterface: "only equi-join constraints (combined with 'AND') are currently supported; found op = '{:?}'", op)
-            },
+            _ => polars_bail!(
+                // TODO: should be able to support more operators later (via `join_where`?)
+                SQLInterface: "only equi-join constraints (combined with 'AND') are currently supported; found op = '{:?}'", op
+            ),
         },
-        SQLExpr::Nested(expr) => process_join_on(expr, tbl_left, tbl_right),
-        _ => {
-            polars_bail!(SQLInterface: "only equi-join constraints are currently supported; found expression = {:?}", expression)
-        },
+        SQLExpr::Nested(expr) => process_join_on(ctx, expr, tbl_left, tbl_right),
+        _ => polars_bail!(
+            SQLInterface: "only equi-join constraints are currently supported; found expression = {:?}", sql_expr
+        ),
     }
 }
 
@@ -1684,10 +2019,11 @@ fn process_join_constraint(
     constraint: &JoinConstraint,
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
+    ctx: &mut SQLContext,
 ) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
     match constraint {
         JoinConstraint::On(expr @ SQLExpr::BinaryOp { .. }) => {
-            process_join_on(expr, tbl_left, tbl_right)
+            process_join_on(ctx, expr, tbl_left, tbl_right)
         },
         JoinConstraint::Using(idents) if !idents.is_empty() => {
             let using: Vec<Expr> = idents.iter().map(|id| col(id.value.as_str())).collect();
